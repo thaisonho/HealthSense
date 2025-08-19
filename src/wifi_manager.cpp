@@ -15,9 +15,15 @@ WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password) :
     apModeActive(false),
     lastWifiCheck(0),
     wifiCheckInterval(5000),
+    username(""),
+    password(""),
+    isAuthenticated(false),
+    apiService("http://localhost:30000/api"),
     setupUICallback(nullptr),
     initializeSensorCallback(nullptr),
-    updateConnectionStatusCallback(nullptr)
+    updateConnectionStatusCallback(nullptr),
+    authenticationStatusCallback(nullptr),
+    dataTransmissionCallback(nullptr)
 {
     apIP = IPAddress(192, 168, 4, 1);
     server = new WebServer(80);
@@ -36,6 +42,9 @@ void WiFiManager::begin() {
     server->on("/wifi", [this](){ this->handleWiFi(); });
     server->on("/connect", HTTP_POST, [this](){ this->handleConnect(); });
     server->on("/guest", [this](){ this->handleGuest(); });
+    server->on("/user", [this](){ this->handleUserMode(); });
+    server->on("/login", [this](){ this->handleUserLogin(); });
+    server->on("/login-attempt", HTTP_POST, [this](){ this->handleLoginAttempt(); });
     server->onNotFound([this](){ this->handleNotFound(); });
     server->begin();
     Serial.println("HTTP server started");
@@ -193,13 +202,15 @@ void WiFiManager::handleRoot() {
                   "input[type='text'], input[type='password'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }"
                   ".guest-btn { background: #2196F3; }"
                   ".guest-btn:hover { background: #0b7dda; }"
+                  ".user-btn { background: #4CAF50; }"
+                  ".user-btn:hover { background: #45a049; }"
                   "</style>"
                   "</head>"
                   "<body>"
                   "<div class='container'>"
                   "<h1>HealthSense Setup</h1>"
                   "<p>Choose your connection option:</p>"
-                  "<form action='/wifi' method='get'><button type='submit'>Connect to WiFi</button></form>"
+                  "<form action='/user' method='get'><button type='submit' class='user-btn'>User Mode</button></form>"
                   "<form action='/guest' method='get'><button type='submit' class='guest-btn'>Guest Mode</button></form>"
                   "</div>"
                   "</body></html>";
@@ -299,6 +310,7 @@ void WiFiManager::handleConnect() {
 
 void WiFiManager::handleGuest() {
     isGuestMode = true;
+    isAuthenticated = false;
     saveWiFiCredentials("", "", true);
     
     String html = "<!DOCTYPE html><html>"
@@ -309,13 +321,16 @@ void WiFiManager::handleGuest() {
                   ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
                   "h1 { color: #333; }"
                   ".success { color: #2196F3; }"
+                  "a { color: #4CAF50; text-decoration: none; font-weight: bold; }"
+                  "a:hover { text-decoration: underline; }"
                   "</style>"
                   "</head>"
                   "<body>"
                   "<div class='container'>"
                   "<h1>Guest Mode Activated</h1>"
                   "<p class='success'>The device will operate in Guest Mode.</p>"
-                  "<p>You can continue to use the WiFi AP to connect again later if needed.</p>"
+                  "<p>You can measure your heart rate and SpO2 but data won't be saved to your account.</p>"
+                  "<p>Create an account at <a href='http://localhost:30000' target='_blank'>localhost:30000</a> to save your measurements.</p>"
                   "<p><strong>GUEST MODE</strong></p>"
                   "</div>"
                   "</body></html>";
@@ -334,9 +349,138 @@ void WiFiManager::handleGuest() {
     apModeActive = true;
 }
 
+void WiFiManager::handleUserMode() {
+    // Check if WiFi is already connected
+    if (isConnected) {
+        // If connected, show login page
+        handleUserLogin();
+    } else {
+        // If not connected, show WiFi setup page
+        handleWiFi();
+    }
+}
+
+void WiFiManager::handleUserLogin() {
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<title>HealthSense User Login</title>"
+                  "<style>"
+                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                  "h1 { color: #333; }"
+                  "button, input[type='submit'] { background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 0; width: 100%; }"
+                  "button:hover, input[type='submit']:hover { background: #45a049; }"
+                  "input[type='text'], input[type='password'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }"
+                  ".back-btn { background: #f44336; }"
+                  ".back-btn:hover { background: #d32f2f; }"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container'>"
+                  "<h1>User Login</h1>"
+                  "<form action='/login-attempt' method='post'>"
+                  "<label for='username'>Username:</label><br>"
+                  "<input type='text' id='username' name='username' required><br>"
+                  "<label for='password'>Password:</label><br>"
+                  "<input type='password' id='password' name='password' required><br>"
+                  "<input type='submit' value='Login'>"
+                  "</form>"
+                  "<form action='/' method='get'><button type='submit' class='back-btn'>Back</button></form>"
+                  "</div>"
+                  "</body></html>";
+    server->send(200, "text/html", html);
+}
+
+void WiFiManager::handleLoginAttempt() {
+    String username = server->arg("username");
+    String password = server->arg("password");
+    
+    if (username.length() > 0 && password.length() > 0) {
+        // Save credentials locally
+        this->username = username;
+        this->password = password;
+        isGuestMode = false;
+        
+        // Attempt to authenticate
+        bool authSuccess = authenticateUser(username, password);
+        String uid = authSuccess ? apiService.getUserId() : "";
+        
+        // Generate response HTML
+        String html = "<!DOCTYPE html><html>"
+                    "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                    "<title>HealthSense Authentication</title>"
+                    "<style>"
+                    "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                    ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                    "h1 { color: #333; }"
+                    ".success { color: #4CAF50; }"
+                    ".error { color: #f44336; }"
+                    "</style>"
+                    "</head>"
+                    "<body>"
+                    "<div class='container'>"
+                    "<h1>Authentication Status</h1>";
+        
+        if (authSuccess) {
+            html += "<p class='success'>Authentication successful!</p>"
+                   "<p>Your User ID: <strong>" + uid + "</strong></p>"
+                   "<p>Measurements will now be sent to your account.</p>";
+        } else {
+            html += "<p class='error'>Authentication failed!</p>"
+                   "<p>Please check your username and password.</p>"
+                   "<form action='/user' method='get'><button type='submit'>Try Again</button></form>";
+        }
+        
+        html += "</div></body></html>";
+        server->send(200, "text/html", html);
+        
+        // Call authentication callback if exists
+        if (authenticationStatusCallback) {
+            authenticationStatusCallback(authSuccess, uid);
+        }
+        
+        // If authenticated, initialize sensor
+        if (authSuccess && initializeSensorCallback) {
+            initializeSensorCallback();
+        }
+        
+        // Update connection status
+        if (updateConnectionStatusCallback) {
+            updateConnectionStatusCallback(isConnected, false); // Not in guest mode
+        }
+    } else {
+        // Invalid input, redirect to login page
+        server->sendHeader("Location", "/user");
+        server->send(302, "text/plain", "");
+    }
+}
+
 void WiFiManager::handleNotFound() {
     server->sendHeader("Location", "http://" + apIP.toString(), true);
     server->send(302, "text/plain", "");
+}
+
+bool WiFiManager::authenticateUser(String username, String password) {
+    // Attempt to authenticate via API service
+    bool success = apiService.authenticateUser(username, password);
+    isAuthenticated = success;
+    return success;
+}
+
+bool WiFiManager::sendHealthData(int heartRate, int spo2) {
+    // Only send data if authenticated
+    if (!isAuthenticated) {
+        return false;
+    }
+    
+    bool success = apiService.sendHealthData(heartRate, spo2);
+    
+    // Call data transmission callback if exists
+    if (dataTransmissionCallback) {
+        dataTransmissionCallback(success);
+    }
+    
+    return success;
 }
 
 void WiFiManager::loop() {
@@ -358,4 +502,12 @@ void WiFiManager::setInitializeSensorCallback(void (*callback)()) {
 
 void WiFiManager::setUpdateConnectionStatusCallback(void (*callback)(bool connected, bool guestMode)) {
     updateConnectionStatusCallback = callback;
+}
+
+void WiFiManager::setAuthenticationStatusCallback(void (*callback)(bool authenticated, String uid)) {
+    authenticationStatusCallback = callback;
+}
+
+void WiFiManager::setDataTransmissionCallback(void (*callback)(bool success)) {
+    dataTransmissionCallback = callback;
 }

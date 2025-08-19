@@ -77,6 +77,35 @@ void DisplayManager::showLoggedIn() {
     tft->println("USER LOGGED IN");
 }
 
+void DisplayManager::showAuthenticated(String uid) {
+    tft->fillRect(0, 150, 160, 20, ST7735_BLACK);
+    tft->setCursor(5, 150);
+    tft->setTextColor(ST7735_GREEN);
+    tft->println("AUTHENTICATED");
+    tft->setCursor(5, 160);
+    tft->print("UID: ");
+    tft->println(uid);
+}
+
+void DisplayManager::showAuthenticationFailed() {
+    tft->fillRect(0, 150, 160, 10, ST7735_BLACK);
+    tft->setCursor(5, 150);
+    tft->setTextColor(ST7735_RED);
+    tft->println("AUTH FAILED");
+}
+
+void DisplayManager::showDataTransmitted(bool success) {
+    tft->fillRect(0, 140, 160, 10, ST7735_BLACK);
+    tft->setCursor(5, 140);
+    if (success) {
+        tft->setTextColor(ST7735_GREEN);
+        tft->println("Data sent");
+    } else {
+        tft->setTextColor(ST7735_RED);
+        tft->println("Send failed");
+    }
+}
+
 void DisplayManager::setupSensorUI() {
     tft->fillRect(0, 70, 160, 50, ST7735_BLACK);
     tft->setTextColor(ST7735_WHITE);

@@ -7,6 +7,7 @@
 #include "wifi_manager.h"
 #include "display_manager.h"
 #include "sensor_manager.h"
+#include "api_service.h"
 #include "images.h"
 
 // Define pins for the ESP32
@@ -28,16 +29,22 @@ SensorManager sensorManager(100); // buffer size 100
 enum AppState {
   STATE_SETUP,
   STATE_CONNECTING,
-  STATE_MEASURING
+  STATE_MEASURING,
+  STATE_TRANSMITTING
 };
 
 AppState currentState = STATE_SETUP;
 bool isInitialized = false;
+bool isAuthenticated = false;
+unsigned long lastDataTransmission = 0;
+const unsigned long dataTransmissionInterval = 10000; // 10 seconds interval
 
 // Function prototypes
 void setupUI();
 void initializeSensor();
 void updateConnectionStatus(bool connected, bool guestMode);
+void handleAuthenticationStatus(bool authenticated, String uid);
+void handleDataTransmission(bool success);
 
 void setup() {
   Serial.begin(9600);
@@ -52,10 +59,20 @@ void setup() {
   wifiManager.setSetupUICallback(setupUI);
   wifiManager.setInitializeSensorCallback(initializeSensor);
   wifiManager.setUpdateConnectionStatusCallback(updateConnectionStatus);
+  wifiManager.setAuthenticationStatusCallback(handleAuthenticationStatus);
+  wifiManager.setDataTransmissionCallback(handleDataTransmission);
   
   // Set up callbacks for sensor manager
   sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2) {
     display.updateSensorReadings(hr, validHR, spo2, validSPO2);
+    
+    // If authenticated and both readings are valid, transmit data to server
+    if (isAuthenticated && validHR && validSPO2 && 
+        (millis() - lastDataTransmission > dataTransmissionInterval)) {
+      // Only send if it's time for a new transmission
+      wifiManager.sendHealthData(hr, spo2);
+      lastDataTransmission = millis();
+    }
   });
   
   sensorManager.setUpdateFingerStatusCallback([](bool fingerDetected) {
@@ -99,6 +116,11 @@ void loop() {
         }
       }
       break;
+      
+    case STATE_TRANSMITTING:
+      // This state is handled by the sensor readings callback
+      currentState = STATE_MEASURING;
+      break;
   }
 }
 
@@ -122,9 +144,26 @@ void updateConnectionStatus(bool connected, bool guestMode) {
     currentState = STATE_MEASURING;
   } else if (guestMode) {
     display.showGuestMode();
+    isAuthenticated = false;
     currentState = STATE_MEASURING;
   } else {
     currentState = STATE_SETUP;
     sensorManager.setReady(false);
   }
+}
+
+// Callback for authentication status
+void handleAuthenticationStatus(bool authenticated, String uid) {
+  isAuthenticated = authenticated;
+  
+  if (authenticated) {
+    display.showAuthenticated(uid);
+  } else {
+    display.showAuthenticationFailed();
+  }
+}
+
+// Callback for data transmission status
+void handleDataTransmission(bool success) {
+  display.showDataTransmitted(success);
 }

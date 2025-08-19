@@ -27,6 +27,9 @@ public:
     void showConnectionFailure();
     void showGuestMode();
     void showLoggedIn();
+    void showAuthenticated(String uid);
+    void showAuthenticationFailed();
+    void showDataTransmitted(bool success);
     void setupSensorUI();
     void updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2);
     void showMeasuringStatus();
