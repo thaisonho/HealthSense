@@ -578,7 +578,7 @@ void WiFiManager::handleGuest() {
                   "<p class='success'>The device is now operating in Guest Mode.</p>"
                   "<p>You can measure your vital signs without creating an account.</p>"
                   "<p>To save your measurements and track your health over time, please register at: "
-                  "<a href='http://localhost:30001' target='_blank'>HealthSense Portal</a></p>"
+                  "<a href='https://iot.newnol.io.vn' target='_blank'>HealthSense Portal</a></p>"
                   "<meta http-equiv='refresh' content='2;url=/measurement'>"
                   "<p>You will be redirected to measurement in 2 seconds...</p>"
                   "</div>"
@@ -750,8 +750,11 @@ bool WiFiManager::authenticateUser(String email, String password) {
     if (!isConnected) return false;
     
     HTTPClient http;
-    String url = "https://iot.newnol.io.vn/api/login";
-    
+    String url = serverURL;
+    if (!url.endsWith("/")) {
+        url += "/";
+    }
+    url += "api/login";
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     
