@@ -64,17 +64,70 @@ void DisplayManager::showConnectionFailure() {
 }
 
 void DisplayManager::showGuestMode() {
-    tft->fillRect(0, 150, 160, 10, ST7735_BLACK);
+    tft->fillRect(0, 150, 160, 30, ST7735_BLACK);
     tft->setCursor(5, 150);
     tft->setTextColor(ST7735_CYAN);
     tft->println("GUEST MODE");
+    
+    // Show registration link info
+    tft->setCursor(5, 160);
+    tft->setTextColor(ST7735_YELLOW);
+    tft->println("Register: localhost:30001");
+    
+    // Show WiFi reconfiguration option
+    showWiFiReconfigOption();
 }
 
 void DisplayManager::showLoggedIn() {
-    tft->fillRect(0, 150, 160, 10, ST7735_BLACK);
+    tft->fillRect(0, 150, 160, 30, ST7735_BLACK);
     tft->setCursor(5, 150);
-    tft->setTextColor(ST7735_WHITE);
+    tft->setTextColor(ST7735_GREEN);
     tft->println("USER LOGGED IN");
+    
+    // Show WiFi reconfiguration option
+    showWiFiReconfigOption();
+}
+
+void DisplayManager::showLoginPage() {
+    tft->fillRect(0, 70, 160, 90, ST7735_BLACK);
+    tft->setTextColor(ST7735_WHITE);
+    tft->setCursor(5, 70);
+    tft->println("Login Required");
+    tft->setCursor(5, 90);
+    tft->println("Please visit:");
+    tft->setCursor(5, 100);
+    tft->setTextColor(ST7735_YELLOW);
+    tft->print("http://");
+    tft->println(WiFi.localIP().toString());
+    tft->setCursor(5, 110);
+    tft->setTextColor(ST7735_WHITE);
+    tft->println("to login with your");
+    tft->setCursor(5, 120);
+    tft->println("email and password");
+}
+
+void DisplayManager::showLoginStatus(bool success) {
+    tft->fillRect(0, 130, 160, 20, ST7735_BLACK);
+    tft->setCursor(5, 130);
+    
+    if (success) {
+        tft->setTextColor(ST7735_GREEN);
+        tft->println("Login successful!");
+        tft->setCursor(5, 140);
+        tft->println("Measuring will begin...");
+    } else {
+        tft->setTextColor(ST7735_RED);
+        tft->println("Login failed!");
+        tft->setCursor(5, 140);
+        tft->println("Please try again");
+    }
+}
+
+void DisplayManager::showWiFiReconfigOption() {
+    tft->setCursor(5, 170);
+    tft->setTextColor(ST7735_WHITE);
+    tft->print("Reconfigure WiFi: ");
+    tft->println(WiFi.localIP().toString());
 }
 
 void DisplayManager::setupSensorUI() {
@@ -92,6 +145,14 @@ void DisplayManager::setupSensorUI() {
     tft->setTextColor(ST7735_BLUE);
     tft->print("SpO2: ");
     tft->println("-- %");
+    
+    // Add WiFi reconfiguration info
+    tft->setTextSize(1);
+    tft->setCursor(5, 130);
+    tft->setTextColor(ST7735_YELLOW);
+    tft->println("IP: " + WiFi.localIP().toString());
+    tft->setCursor(5, 140);
+    tft->println("Visit to reconfigure WiFi");
 }
 
 void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2) {

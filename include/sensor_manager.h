@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+// Include our fix for ESP32 and MAX30105.h compatibility
+#include "esp32_max30105_fix.h"
 // Make sure Wire.h is included before MAX30105.h to avoid buffer length conflicts
 #include "spo2_algorithm.h"
 #include "MAX30105.h"

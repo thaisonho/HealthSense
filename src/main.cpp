@@ -21,13 +21,15 @@
 // Create instances
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 DisplayManager display(&tft, eva, eva_width, eva_height);
-WiFiManager wifiManager("HealthSense", "123123123");
+// Replace with your actual API server URL
+WiFiManager wifiManager("HealthSense", "123123123", "http://yourapiserver.com");
 SensorManager sensorManager(100); // buffer size 100
 
 // App state
 enum AppState {
   STATE_SETUP,
   STATE_CONNECTING,
+  STATE_LOGIN,
   STATE_MEASURING
 };
 
@@ -37,7 +39,8 @@ bool isInitialized = false;
 // Function prototypes
 void setupUI();
 void initializeSensor();
-void updateConnectionStatus(bool connected, bool guestMode);
+void updateConnectionStatus(bool connected, bool guestMode, bool loggedIn);
+void sendSensorData(String uid, int32_t heartRate, int32_t spo2);
 
 void setup() {
   Serial.begin(9600);
@@ -52,10 +55,16 @@ void setup() {
   wifiManager.setSetupUICallback(setupUI);
   wifiManager.setInitializeSensorCallback(initializeSensor);
   wifiManager.setUpdateConnectionStatusCallback(updateConnectionStatus);
+  wifiManager.setSendDataCallback(sendSensorData);
   
   // Set up callbacks for sensor manager
   sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2) {
     display.updateSensorReadings(hr, validHR, spo2, validSPO2);
+    
+    // Only send valid readings to the server
+    if (validHR && validSPO2) {
+      wifiManager.sendSensorData(hr, spo2);
+    }
   });
   
   sensorManager.setUpdateFingerStatusCallback([](bool fingerDetected) {
@@ -85,9 +94,14 @@ void loop() {
       // (handled by WiFi manager callbacks)
       break;
       
+    case STATE_LOGIN:
+      // Wait for user to log in
+      // (handled by WiFi manager callbacks)
+      break;
+      
     case STATE_MEASURING:
-      // Only start sensor readings when in measuring state and sensor is ready
-      if (sensorManager.isReady()) {
+      // Only start sensor readings when in measuring state, sensor is ready, and we should be measuring
+      if (sensorManager.isReady() && wifiManager.isMeasurementActive()) {
         static bool firstReading = true;
         
         if (firstReading) {
@@ -116,15 +130,34 @@ void initializeSensor() {
 }
 
 // Callback for connection status changes
-void updateConnectionStatus(bool connected, bool guestMode) {
-  if (connected) {
+void updateConnectionStatus(bool connected, bool guestMode, bool loggedIn) {
+  if (connected && loggedIn) {
+    // User mode with successful login
     display.showLoggedIn();
     currentState = STATE_MEASURING;
   } else if (guestMode) {
+    // Guest mode
     display.showGuestMode();
     currentState = STATE_MEASURING;
+  } else if (connected && !loggedIn) {
+    // Connected but not logged in yet
+    currentState = STATE_LOGIN;
+    sensorManager.setReady(false);
   } else {
+    // Not connected
     currentState = STATE_SETUP;
     sensorManager.setReady(false);
   }
+}
+
+// Callback for sending sensor data to server
+void sendSensorData(String uid, int32_t heartRate, int32_t spo2) {
+  // This function is just for logging purposes
+  // The actual data sending is handled in WiFiManager's sendSensorData method
+  Serial.print("Sending data for user: ");
+  Serial.print(uid);
+  Serial.print(", HR: ");
+  Serial.print(heartRate);
+  Serial.print(", SpO2: ");
+  Serial.println(spo2);
 }
