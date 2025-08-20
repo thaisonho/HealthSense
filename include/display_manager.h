@@ -5,6 +5,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include <SPI.h>
+#include <WiFi.h>
+#include "common_types.h"
 
 class DisplayManager {
 private:
@@ -27,10 +29,13 @@ public:
     void showConnectionFailure();
     void showGuestMode();
     void showLoggedIn();
+    void showLoginPage();
+    void showLoginStatus(bool success);
     void setupSensorUI();
-    void updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2);
-    void showMeasuringStatus();
+    void updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2, MeasurementPhase phase);
+    void showMeasuringStatus(MeasurementPhase phase);
     void showFingerStatus(bool fingerDetected);
+    void showWiFiReconfigOption();
 };
 
 #endif // DISPLAY_MANAGER_H

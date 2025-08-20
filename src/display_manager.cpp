@@ -64,17 +64,70 @@ void DisplayManager::showConnectionFailure() {
 }
 
 void DisplayManager::showGuestMode() {
-    tft->fillRect(0, 150, 160, 10, ST7735_BLACK);
+    tft->fillRect(0, 150, 160, 30, ST7735_BLACK);
     tft->setCursor(5, 150);
     tft->setTextColor(ST7735_CYAN);
     tft->println("GUEST MODE");
+    
+    // Show registration link info
+    tft->setCursor(5, 160);
+    tft->setTextColor(ST7735_YELLOW);
+    tft->println("Register: localhost:30001");
+    
+    // Show WiFi reconfiguration option
+    showWiFiReconfigOption();
 }
 
 void DisplayManager::showLoggedIn() {
-    tft->fillRect(0, 150, 160, 10, ST7735_BLACK);
+    tft->fillRect(0, 150, 160, 30, ST7735_BLACK);
     tft->setCursor(5, 150);
-    tft->setTextColor(ST7735_WHITE);
+    tft->setTextColor(ST7735_GREEN);
     tft->println("USER LOGGED IN");
+    
+    // Show WiFi reconfiguration option
+    showWiFiReconfigOption();
+}
+
+void DisplayManager::showLoginPage() {
+    tft->fillRect(0, 70, 160, 90, ST7735_BLACK);
+    tft->setTextColor(ST7735_WHITE);
+    tft->setCursor(5, 70);
+    tft->println("Login Required");
+    tft->setCursor(5, 90);
+    tft->println("Please visit:");
+    tft->setCursor(5, 100);
+    tft->setTextColor(ST7735_YELLOW);
+    tft->print("http://");
+    tft->println(WiFi.localIP().toString());
+    tft->setCursor(5, 110);
+    tft->setTextColor(ST7735_WHITE);
+    tft->println("to login with your");
+    tft->setCursor(5, 120);
+    tft->println("email and password");
+}
+
+void DisplayManager::showLoginStatus(bool success) {
+    tft->fillRect(0, 130, 160, 20, ST7735_BLACK);
+    tft->setCursor(5, 130);
+    
+    if (success) {
+        tft->setTextColor(ST7735_GREEN);
+        tft->println("Login successful!");
+        tft->setCursor(5, 140);
+        tft->println("Measuring will begin...");
+    } else {
+        tft->setTextColor(ST7735_RED);
+        tft->println("Login failed!");
+        tft->setCursor(5, 140);
+        tft->println("Please try again");
+    }
+}
+
+void DisplayManager::showWiFiReconfigOption() {
+    tft->setCursor(5, 170);
+    tft->setTextColor(ST7735_WHITE);
+    tft->print("Reconfigure WiFi: ");
+    tft->println(WiFi.localIP().toString());
 }
 
 void DisplayManager::setupSensorUI() {
@@ -92,9 +145,17 @@ void DisplayManager::setupSensorUI() {
     tft->setTextColor(ST7735_BLUE);
     tft->print("SpO2: ");
     tft->println("-- %");
+    
+    // Add WiFi reconfiguration info
+    tft->setTextSize(1);
+    tft->setCursor(5, 130);
+    tft->setTextColor(ST7735_YELLOW);
+    tft->println("IP: " + WiFi.localIP().toString());
+    tft->setCursor(5, 140);
+    tft->println("Visit to reconfigure WiFi");
 }
 
-void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2) {
+void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2, MeasurementPhase phase) {
     // Clear previous readings
     tft->fillRect(75, 90, 80, 10, ST7735_BLACK);  // Clear heart rate value area
     tft->fillRect(45, 110, 80, 10, ST7735_BLACK); // Clear SpO2 value area
@@ -102,7 +163,9 @@ void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32
     // Display heart rate
     tft->setCursor(75, 90);
     tft->setTextColor(ST7735_RED);
-    if (validHR) {
+    
+    // Only show valid readings in RELIABLE phase
+    if (validHR && phase == PHASE_RELIABLE) {
         tft->print(heartRate);
         tft->print(" BPM");
     } else {
@@ -112,19 +175,45 @@ void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32
     // Display SpO2
     tft->setCursor(45, 110);
     tft->setTextColor(ST7735_BLUE);
-    if (validSPO2) {
+    if (validSPO2 && phase == PHASE_RELIABLE) {
         tft->print(spo2);
         tft->print(" %");
     } else {
         tft->print("-- %");
     }
+    
+    // Update the measurement status based on the phase
+    showMeasuringStatus(phase);
 }
 
-void DisplayManager::showMeasuringStatus() {
+void DisplayManager::showMeasuringStatus(MeasurementPhase phase) {
     tft->fillRect(5, 130, 160, 10, ST7735_BLACK);
     tft->setCursor(5, 130);
-    tft->setTextColor(ST7735_GREEN);
-    tft->print("Measuring...");
+    
+    switch (phase) {
+        case PHASE_INIT:
+            // Initial phase - warming up (first 1-3 seconds)
+            tft->setTextColor(ST7735_YELLOW);
+            tft->print("Warming up...");
+            break;
+            
+        case PHASE_STABILIZE:
+            // Stabilization phase (next 3-8 seconds)
+            tft->setTextColor(ST7735_CYAN);
+            tft->print("Stabilizing signal...");
+            break;
+            
+        case PHASE_RELIABLE:
+            // Reliable results phase (after 5-10 seconds)
+            tft->setTextColor(ST7735_GREEN);
+            tft->print("Reliable reading");
+            break;
+            
+        default:
+            tft->setTextColor(ST7735_GREEN);
+            tft->print("Measuring...");
+            break;
+    }
 }
 
 void DisplayManager::showFingerStatus(bool fingerDetected) {
