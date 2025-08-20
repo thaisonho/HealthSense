@@ -37,6 +37,15 @@ void WiFiManager::begin() {
     // Always start in AP mode first to allow WiFi selection
     setupAPMode();
     
+    // Try to connect to saved WiFi if credentials exist
+    if (userSSID.length() > 0) {
+        // This will maintain AP mode while also connecting to the station
+        connectToWiFi(userSSID, userPassword);
+    }
+    
+    // Ensure AP mode is active regardless of WiFi connection status
+    ensureAPMode();
+    
     // Setup web server
     server->on("/", [this](){ this->handleRoot(); });
     server->on("/wifi", [this](){ this->handleWiFi(); });
@@ -85,6 +94,14 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
     Serial.print("SSID: ");
     Serial.println(ssid);
     
+    // Set WiFi mode to both AP and STA to maintain both connections
+    WiFi.mode(WIFI_AP_STA);
+    
+    // Ensure AP is still running with our configuration
+    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+    WiFi.softAP(ap_ssid, ap_password);
+    
+    // Connect to the provided network
     WiFi.begin(ssid.c_str(), password.c_str());
     
     int attempts = 0;
@@ -97,8 +114,10 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("");
         Serial.println("WiFi connected");
-        Serial.print("IP address: ");
+        Serial.print("Station IP address: ");
         Serial.println(WiFi.localIP());
+        Serial.print("AP IP address: ");
+        Serial.println(WiFi.softAPIP());
         
         if (updateConnectionStatusCallback) {
             updateConnectionStatusCallback(true, false, isLoggedIn);
@@ -197,24 +216,53 @@ void WiFiManager::saveWiFiCredentials(String ssid, String password, bool guestMo
     EEPROM.end();
 }
 
+// New method to ensure AP is always running
+void WiFiManager::ensureAPMode() {
+    if (!apModeActive || WiFi.getMode() == WIFI_STA) {
+        Serial.println("Ensuring AP mode is active alongside STA mode");
+        WiFi.mode(WIFI_AP_STA);
+        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+        WiFi.softAP(ap_ssid, ap_password);
+        apModeActive = true;
+        Serial.print("AP IP address: ");
+        Serial.println(WiFi.softAPIP());
+    }
+}
+
 void WiFiManager::checkWiFiConnection() {
     // Only check periodically
-    if ((millis() - lastWifiCheck < wifiCheckInterval) && isConnected) {
+    if ((millis() - lastWifiCheck < wifiCheckInterval)) {
         return;
     }
     
     lastWifiCheck = millis();
+    
+    // Always ensure AP is running for device access
+    ensureAPMode();
     
     // If we were connected but lost connection
     if (isConnected && WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi connection lost!");
         isConnected = false;
         
-        // Start AP mode
-        setupAPMode();
-        
         if (updateConnectionStatusCallback) {
             updateConnectionStatusCallback(false, isGuestMode, isLoggedIn);
+        }
+        
+        // Try to reconnect if we have credentials
+        if (userSSID.length() > 0) {
+            Serial.println("Attempting to reconnect to WiFi");
+            WiFi.begin(userSSID.c_str(), userPassword.c_str());
+        }
+    } else if (!isConnected && WiFi.status() == WL_CONNECTED) {
+        // We've reconnected
+        isConnected = true;
+        Serial.println("WiFi reconnected");
+        Serial.print("IP address: ");
+        Serial.println(WiFi.localIP());
+        
+        if (updateConnectionStatusCallback) {
+            updateConnectionStatusCallback(true, isGuestMode, isLoggedIn);
         }
     }
 }
@@ -251,12 +299,14 @@ void WiFiManager::handleRoot() {
     
     // Show WiFi status
     if (isConnected) {
-        html += "<p class='status connected'>WiFi Connected to: " + userSSID + "</p>";
+        html += "<p class='status connected'>WiFi Connected to: " + userSSID + "</p>"
+                "<p>Network IP Address: " + WiFi.localIP().toString() + "</p>";
     } else {
         html += "<p class='status disconnected'>WiFi Not Connected</p>";
     }
     
-    html += "<p>Configure your WiFi connection:</p>"
+    html += "<p>You can always access this device at: " + WiFi.softAPIP().toString() + "</p>"
+            "<p>Configure your WiFi connection:</p>"
             "<form action='/wifi' method='get'><button type='submit'>Setup WiFi</button></form>";
     
     if (isConnected) {
@@ -330,12 +380,12 @@ void WiFiManager::handleConnect() {
         if (isConnected) {
             html += "<p class='success'>WiFi connected successfully!</p>"
                     "<p>Connected to: " + ssid + "</p>"
-                    "<p>IP Address: " + WiFi.localIP().toString() + "</p>"
+                    "<p>Network IP Address: " + WiFi.localIP().toString() + "</p>"
+                    "<p>You can also always access this device at: " + WiFi.softAPIP().toString() + "</p>"
                     "<meta http-equiv='refresh' content='3;url=/mode'>"
                     "<p>You will be redirected to mode selection in 3 seconds...</p>";
             
-            // Set WiFi mode to both AP and STA - so hotspot remains available
-            WiFi.mode(WIFI_AP_STA);
+            // The AP mode is already set in connectToWiFi
         } else {
             html += "<p class='error'>Failed to connect to WiFi!</p>"
                     "<p>Please check your credentials and try again.</p>"
@@ -452,11 +502,17 @@ void WiFiManager::handleLoginSubmit() {
                 ".error { color: #f44336; }"
                 "button { background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 0; width: 100%; }"
                 "button:hover { background: #45a049; }"
+                ".back-btn { background: #2196F3; margin-top: 15px; }"
+                ".back-btn:hover { background: #0b7dda; }"
                 "</style>"
                 "</head>"
                 "<body>"
                 "<div class='container'>"
                 "<h1>Login Status</h1>";
+    
+    Serial.println("Attempting to authenticate user");
+    Serial.print("Email: ");
+    Serial.println(email);
     
     // Authenticate user with API
     bool loginSuccess = authenticateUser(email, password);
@@ -466,6 +522,8 @@ void WiFiManager::handleLoginSubmit() {
                 "<p>Welcome back, " + email + "!</p>"
                 "<meta http-equiv='refresh' content='2;url=/measurement'>"
                 "<p>You will be redirected to measurement in 2 seconds...</p>";
+        
+        Serial.println("Login successful, user authenticated");
         
         // Update connection status and set user as logged in
         if (updateConnectionStatusCallback) {
@@ -480,9 +538,15 @@ void WiFiManager::handleLoginSubmit() {
         isMeasuring = true;
     } else {
         html += "<p class='error'>Login failed!</p>"
-                "<p>Please check your credentials and try again.</p>"
-                "<meta http-equiv='refresh' content='3;url=/login'>"
-                "<p>You will be redirected to login page in 3 seconds...</p>";
+                "<p>Invalid email or password. Please try again.</p>"
+                "<form action='/login' method='get'>"
+                "<button type='submit' class='back-btn'>Back to Login</button>"
+                "</form>"
+                "<form action='/mode' method='get'>"
+                "<button type='submit'>Back to Mode Selection</button>"
+                "</form>";
+                
+        Serial.println("Login failed, invalid credentials");
     }
     
     html += "</div></body></html>";
@@ -576,7 +640,7 @@ void WiFiManager::handleMeasurement() {
         html += "<p class='user-status'>User Mode - Data is being saved</p>";
     } else {
         html += "<p class='guest-status'>Guest Mode - Data is not being saved</p>"
-                "<p>Register at: <a href='http://localhost:30001' target='_blank'>HealthSense Portal</a></p>";
+                "<p>Register at: <a href='https://iot.newnol.io.vn' target='_blank'>HealthSense Portal</a></p>";
     }
     
     html += "<p class='status'>Place your finger on the sensor to measure</p>"
@@ -589,11 +653,9 @@ void WiFiManager::handleMeasurement() {
                "<button type='submit' class='reconfigure-btn'>Back to Mode Selection</button>"
                "</form>";
     } else {
-        html += "<form action='/reconfigure_wifi' method='get'>"
-               "<button type='submit' class='reconfigure-btn'>Reconfigure WiFi</button>"
-               "</form>"
-               "<form action='/mode' method='get'>"
-               "<button type='submit'>Back to Mode Selection</button>"
+        // In user mode, we only show the "Back to Mode Selection" button
+        html += "<form action='/mode' method='get'>"
+               "<button type='submit' class='reconfigure-btn'>Back to Mode Selection</button>"
                "</form>";
     }
     
@@ -688,7 +750,7 @@ bool WiFiManager::authenticateUser(String email, String password) {
     if (!isConnected) return false;
     
     HTTPClient http;
-    String url = serverURL + "/api/authenticate";
+    String url = "https://iot.newnol.io.vn/api/login";
     
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
@@ -702,20 +764,59 @@ bool WiFiManager::authenticateUser(String email, String password) {
     
     // Send POST request
     int httpCode = http.POST(payload);
+    Serial.print("Login API response code: ");
+    Serial.println(httpCode);
     
     if (httpCode == HTTP_CODE_OK) {
         // Parse response
         String response = http.getString();
-        DynamicJsonDocument responseDoc(200);
+        Serial.print("Login API response: ");
+        Serial.println(response);
+        
+        DynamicJsonDocument responseDoc(400);
         DeserializationError error = deserializeJson(responseDoc, response);
         
         if (!error) {
+            // Successful login should have a uid field
             const char* uid = responseDoc["uid"];
             if (uid && strlen(uid) > 0) {
                 // Save user credentials
                 saveUserCredentials(email, String(uid));
                 isLoggedIn = true;
+                http.end();
                 return true;
+            } else {
+                Serial.println("Login failed: No valid UID in response");
+            }
+        } else {
+            Serial.print("JSON parse error: ");
+            Serial.println(error.c_str());
+        }
+    } else {
+        // Handle different error cases
+        String response = http.getString();
+        Serial.print("Login failed with response: ");
+        Serial.println(response);
+        
+        // Try to parse error message
+        DynamicJsonDocument errorDoc(400);
+        DeserializationError error = deserializeJson(errorDoc, response);
+        
+        if (!error) {
+            // Check for detail field which contains error information
+            const char* errorDetail = errorDoc["detail"];
+            if (errorDetail) {
+                Serial.print("Error detail: ");
+                Serial.println(errorDetail);
+                
+                // Handle specific error cases
+                if (strcmp(errorDetail, "INVALID_LOGIN_CREDENTIALS") == 0) {
+                    Serial.println("Invalid email or password");
+                } else if (strcmp(errorDetail, "Authentication service unavailable") == 0) {
+                    Serial.println("Firebase service is unavailable");
+                } else if (strcmp(errorDetail, "Missing Firebase API key") == 0) {
+                    Serial.println("Server configuration error: Missing Firebase API key");
+                }
             }
         }
     }
@@ -746,6 +847,15 @@ bool WiFiManager::sendMeasurementData(String uid, int32_t heartRate, int32_t spo
     
     // Send POST request
     int httpCode = http.POST(payload);
+    Serial.print("Measurement API response code: ");
+    Serial.println(httpCode);
+    
+    if (httpCode == HTTP_CODE_OK) {
+        Serial.println("Measurement data sent successfully");
+    } else {
+        Serial.print("Failed to send measurement data: ");
+        Serial.println(http.errorToString(httpCode));
+    }
     
     http.end();
     return (httpCode == HTTP_CODE_OK);

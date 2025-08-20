@@ -3,6 +3,9 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
+// Include common types
+#include "common_types.h"
+
 // Include managers
 #include "wifi_manager.h"
 #include "display_manager.h"
@@ -21,8 +24,8 @@
 // Create instances
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 DisplayManager display(&tft, eva, eva_width, eva_height);
-// Replace with your actual API server URL
-WiFiManager wifiManager("HealthSense", "123123123", "http://yourapiserver.com");
+// IoT API server URL with the correct login endpoint
+WiFiManager wifiManager("HealthSense", "123123123", "https://iot.newnol.io.vn");
 SensorManager sensorManager(100); // buffer size 100
 
 // App state
@@ -57,13 +60,36 @@ void setup() {
   wifiManager.setUpdateConnectionStatusCallback(updateConnectionStatus);
   wifiManager.setSendDataCallback(sendSensorData);
   
-  // Set up callbacks for sensor manager
-  sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2) {
-    display.updateSensorReadings(hr, validHR, spo2, validSPO2);
+  // Set up callbacks for sensor manager with phase information
+  sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2, MeasurementPhase phase) {
+    // Always update the display with current readings, validity flags and measurement phase
+    display.updateSensorReadings(hr, validHR, spo2, validSPO2, phase);
     
-    // Only send valid readings to the server
-    if (validHR && validSPO2) {
-      wifiManager.sendSensorData(hr, spo2);
+    // Only send valid readings to the server in RELIABLE phase
+    if (validHR && validSPO2 && phase == PHASE_RELIABLE) {
+      // Add additional validation checks using physiological constants
+      if (hr >= MIN_VALID_HR && hr <= MAX_VALID_HR && 
+          spo2 >= MIN_VALID_SPO2 && spo2 <= MAX_VALID_SPO2) {
+        Serial.println(F("Reliable readings detected, sending to server"));
+        wifiManager.sendSensorData(hr, spo2);
+      } else {
+        Serial.println(F("Readings outside physiological range, not sending"));
+      }
+    } else if (phase != PHASE_RELIABLE) {
+      // Log the current measurement phase
+      Serial.print(F("In measurement phase: "));
+      switch (phase) {
+        case PHASE_INIT:
+          Serial.println(F("INITIALIZATION (warming up)"));
+          break;
+        case PHASE_STABILIZE:
+          Serial.println(F("STABILIZATION (acquiring stable signal)"));
+          break;
+        default:
+          Serial.println(F("UNKNOWN"));
+      }
+    } else {
+      Serial.println(F("Invalid readings, not sending to server"));
     }
   });
   
@@ -100,17 +126,35 @@ void loop() {
       break;
       
     case STATE_MEASURING:
+      // First check if sensor is connected and working
+      if (!sensorManager.checkI2CConnection()) {
+        // If we're having I2C issues, show a message and wait
+        static unsigned long lastErrorMsgTime = 0;
+        if (millis() - lastErrorMsgTime > 5000) {  // Show error every 5 seconds
+          Serial.println(F("I2C connection issues. Trying to recover..."));
+          // Could update display with error message here
+          lastErrorMsgTime = millis();
+        }
+        delay(100); // Short delay to prevent tight loop
+        break;
+      }
+      
       // Only start sensor readings when in measuring state, sensor is ready, and we should be measuring
       if (sensorManager.isReady() && wifiManager.isMeasurementActive()) {
         static bool firstReading = true;
         
         if (firstReading) {
-          display.showMeasuringStatus();
+          display.showMeasuringStatus(PHASE_INIT);
           sensorManager.readSensor();
           firstReading = false;
         } else {
           sensorManager.processReadings();
         }
+      } else if (wifiManager.isMeasurementActive() && !sensorManager.isReady()) {
+        // If we're supposed to be measuring but sensor isn't ready,
+        // try to reinitialize it
+        sensorManager.initializeSensor();
+        delay(100);
       }
       break;
   }

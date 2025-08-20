@@ -58,6 +58,7 @@ public:
     void setupAPMode();
     bool connectToWiFi(String ssid, String password);
     void checkWiFiConnection();
+    void ensureAPMode();
     void readWiFiCredentials();
     void saveWiFiCredentials(String ssid, String password, bool guestMode);
     void saveUserCredentials(String email, String uid);
