@@ -63,6 +63,8 @@ void WiFiManager::begin() {
     server->on("/reconfigure_wifi", [this](){ this->handleReconfigWiFi(); });
     server->on("/status", [this](){ this->handleStatus(); });
     server->on("/force_ap", [this](){ this->handleForceAP(); });
+    server->on("/ai_analysis", [this](){ this->handleAIAnalysis(); });
+    server->on("/return_to_measurement", [this](){ this->handleReturnToMeasurement(); });
     server->onNotFound([this](){ this->handleNotFound(); });
     server->begin();
     Serial.println("HTTP server started");
@@ -673,10 +675,13 @@ void WiFiManager::handleMeasurement() {
             "<div class='reading spo2'>SpO2: <span id='spo2'>--</span> %</div>"
             "<div class='reading'>Progress: <span id='progress'>0/5</span> readings</div>";
     
-    // Add continue measuring button
+    // Add continue measuring and AI analysis buttons
     html += "<div style='margin: 20px 0;'>"
             "<form action='/continue_measuring' method='get' style='display: inline;'>"
             "<button type='submit' style='background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 5px;'>Start New Measurement</button>"
+            "</form>"
+            "<form action='/ai_analysis' method='get' style='display: inline;'>"
+            "<button type='submit' style='background: #2196F3; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 5px;'>AI Analysis</button>"
             "</form>"
             "</div>";
     
@@ -1167,6 +1172,105 @@ void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
     
     Serial.println(F("🏁 sendSensorData() completed"));
 }
+
+bool WiFiManager::getAIHealthSummary(String& summary) {
+    if (!isConnected) {
+        Serial.println(F("❌ Not connected to WiFi, cannot get AI summary"));
+        return false;
+    }
+    
+    Serial.println(F("🧠 Requesting AI health summary..."));
+    
+    HTTPClient http;
+    String url = serverURL;
+    if (!url.endsWith("/")) {
+        url += "/";
+    }
+    url += "api/ai/sumerize";
+    
+    Serial.print(F("📍 URL: "));
+    Serial.println(url);
+    
+    bool initSuccess = false;
+    try {
+        initSuccess = http.begin(url);
+    } catch (...) {
+        Serial.println(F("❌ Failed to initialize HTTP client"));
+        return false;
+    }
+    
+    if (!initSuccess) {
+        Serial.println(F("❌ HTTP client initialization failed"));
+        return false;
+    }
+    
+    // Add headers
+    http.addHeader("X-Device-Id", DEVICE_ID);
+    
+    // Add user ID if not in guest mode and user is logged in
+    if (!isGuestMode && isLoggedIn && userUID.length() > 0) {
+        http.addHeader("X-User-Id", userUID);
+    }
+    
+    // Send GET request to get AI summary
+    int httpCode = http.GET();
+    Serial.print(F("📥 AI Summary API response code: "));
+    Serial.println(httpCode);
+    
+    bool success = false;
+    if (httpCode == HTTP_CODE_OK) {
+        String response = http.getString();
+        Serial.println(F("✅ AI summary received successfully"));
+        
+        // Parse JSON response
+        DynamicJsonDocument doc(2048); // Larger buffer for AI summary
+        DeserializationError error = deserializeJson(doc, response);
+        
+        if (!error) {
+            summary = doc["summary"].as<String>();
+            success = true;
+        } else {
+            Serial.print(F("❌ JSON parsing error: "));
+            Serial.println(error.c_str());
+            summary = "Error: Could not parse AI summary";
+            success = false;
+        }
+    } else {
+        Serial.print(F("❌ Failed to get AI summary: "));
+        Serial.println(http.errorToString(httpCode));
+        summary = "Error: Failed to get AI summary (Code: " + String(httpCode) + ")";
+        success = false;
+    }
+    
+    http.end();
+    Serial.println(F("🔚 HTTP client closed"));
+    return success;
+}
+
+bool WiFiManager::requestAIHealthSummary(String& summary) {
+    Serial.println(F("🔄 requestAIHealthSummary() called"));
+    
+    if (!isConnected) {
+        summary = "Error: No WiFi connection";
+        Serial.println(F("❌ Not connected to WiFi"));
+        return false;
+    }
+    
+    bool success = getAIHealthSummary(summary);
+    
+    if (success) {
+        Serial.println(F("✅ AI health summary obtained successfully"));
+    } else {
+        Serial.println(F("❌ Failed to get AI health summary"));
+        if (summary.isEmpty()) {
+            summary = "Error: Unable to retrieve health analysis";
+        }
+    }
+    
+    Serial.println(F("🏁 requestAIHealthSummary() completed"));
+    return success;
+}
+
 String WiFiManager::getConnectionInfo() const {
     String info = "Connection Status:\n";
     info += "- WiFi Mode: ";
@@ -1212,6 +1316,87 @@ void WiFiManager::forceAPMode() {
     if (updateConnectionStatusCallback) {
         updateConnectionStatusCallback(false, isGuestMode, isLoggedIn);
     }
+}
+
+void WiFiManager::handleAIAnalysis() {
+    // If not in guest mode and not logged in, redirect to mode selection
+    if (!isGuestMode && !isLoggedIn) {
+        server->sendHeader("Location", "/mode");
+        server->send(302, "text/plain", "");
+        return;
+    }
+    
+    // Request AI health summary
+    String aiSummary;
+    bool success = requestAIHealthSummary(aiSummary);
+    
+    if (!success) {
+        aiSummary = "Error: Unable to retrieve AI health analysis. Please check your connection and try again.";
+    }
+    
+    // Create HTML response
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<title>HealthSense AI Analysis</title>"
+                  "<style>"
+                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                  ".container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                  "h1 { color: #333; margin-bottom: 30px; }"
+                  ".header { background: linear-gradient(to right, #003366, #0066cc); color: white; padding: 15px; border-radius: 10px 10px 0 0; margin: -20px -20px 20px; }"
+                  ".summary { text-align: left; line-height: 1.6; padding: 15px; background-color: #f9f9f9; border-radius: 5px; border-left: 5px solid #2196F3; margin-bottom: 30px; }"
+                  "button, input[type='submit'] { background: #4CAF50; color: white; padding: 12px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 5px; font-weight: bold; }"
+                  "button:hover, input[type='submit']:hover { background: #45a049; }"
+                  ".back-btn { background: #2196F3; }"
+                  ".back-btn:hover { background: #0b7dda; }"
+                  ".disclaimer { font-size: 12px; color: #757575; margin-top: 30px; font-style: italic; }"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container'>"
+                  "<div class='header'>"
+                  "<h1>AI Health Summary</h1>"
+                  "</div>"
+                  "<div class='summary'>" + aiSummary + "</div>"
+                  "<div>"
+                  "<form action='/measurement' method='get' style='display: inline;'>"
+                  "<button type='submit' class='back-btn'>Back to Measurements</button>"
+                  "</form>"
+                  "<form action='/return_to_measurement' method='get' style='display: inline;'>"
+                  "<button type='submit'>New Measurement</button>"
+                  "</form>"
+                  "</div>"
+                  "<p class='disclaimer'>This analysis is provided for informational purposes only and should not replace professional medical advice.</p>"
+                  "</div>"
+                  "</body></html>";
+    
+    server->send(200, "text/html", html);
+    
+    // Call the main.cpp handleAIAnalysisRequest function to display on device
+    extern void handleAIAnalysisRequest(String);
+    handleAIAnalysisRequest(aiSummary);
+}
+
+void WiFiManager::handleReturnToMeasurement() {
+    // Reset measurement state
+    isMeasuring = true;
+    
+    // Trigger sensor initialization (this also resets the display)
+    if (initializeSensorCallback) {
+        initializeSensorCallback();
+    }
+    
+    // Update app state to measuring
+    extern AppState currentState;
+    currentState = STATE_MEASURING;
+    
+    // Start new measurement if callback exists
+    if (startNewMeasurementCallback) {
+        startNewMeasurementCallback();
+    }
+    
+    // Redirect to measurement page
+    server->sendHeader("Location", "/measurement");
+    server->send(302, "text/plain", "");
 }
 
 void WiFiManager::restartWiFi() {

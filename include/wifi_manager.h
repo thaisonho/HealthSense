@@ -52,10 +52,13 @@ private:
     void handleStatus();
     void handleForceAP();
     void handleNotFound();
+    void handleAIAnalysis();
+    void handleReturnToMeasurement();
     
     // API communication
     bool authenticateUser(String email, String password);
     bool sendMeasurementData(String uid, int32_t heartRate, int32_t spo2);
+    bool getAIHealthSummary(String& summary);
 
 public:
     WiFiManager(const char* ap_ssid, const char* ap_password, const char* serverURL = "http://yourapiserver.com");
@@ -69,6 +72,7 @@ public:
     void saveUserCredentials(String email, String uid);
     void sendSensorData(int32_t heartRate, int32_t spo2);
     bool sendDeviceData(int32_t heartRate, int32_t spo2, String userId = "");
+    bool requestAIHealthSummary(String& summary);
     
     // Setters for callbacks
     void setSetupUICallback(void (*callback)());

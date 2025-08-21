@@ -35,6 +35,9 @@ public:
     void showMeasuringStatus();
     void showFingerStatus(bool fingerDetected);
     void showWiFiReconfigOption();
+    void showAIAnalysisButton();
+    void showAIAnalysisLoading();
+    void displayAIHealthSummary(const String& summary);
 };
 
 #endif // DISPLAY_MANAGER_H
