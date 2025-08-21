@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 #include <EEPROM.h>
+#include <esp_wifi.h>
 
 // EEPROM constants
 #define EEPROM_SIZE 1024
@@ -20,6 +21,7 @@ WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password, const cha
     isMeasuring(false),
     lastWifiCheck(0),
     wifiCheckInterval(5000),
+    lastWifiErrorCode(WL_IDLE_STATUS),
     setupUICallback(nullptr),
     initializeSensorCallback(nullptr),
     updateConnectionStatusCallback(nullptr),
@@ -27,31 +29,76 @@ WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password, const cha
     startNewMeasurementCallback(nullptr),
     handleAIAnalysisCallback(nullptr)
 {
+    // Initialize common CSS
+    commonCSS = "@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');"
+                "body { font-family: 'Roboto', Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                "h1 { color: #333; }"
+                ".status { font-weight: bold; margin-bottom: 20px; }"
+                ".connected { color: #4CAF50; }"
+                ".disconnected { color: #f44336; }"
+                "button, input[type='submit'] { background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 0; width: 100%; }"
+                "button:hover, input[type='submit']:hover { background: #45a049; }"
+                "input[type='text'], input[type='password'], input[type='email'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }"
+                ".guest-btn { background: #2196F3; }"
+                ".guest-btn:hover { background: #0b7dda; }"
+                ".back-btn { background: #f44336; }"
+                ".back-btn:hover { background: #d32f2f; }";
+
     apIP = IPAddress(192, 168, 4, 1);
     server = new WebServer(80);
     dnsServer = new DNSServer();
 }
 
 void WiFiManager::begin() {
+    // Initialize EEPROM
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.end();
+    
+    // Reset WiFi before anything else
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(1000);
+    
     // Read saved WiFi credentials
     readWiFiCredentials();
+    
+    Serial.println("Starting WiFi Manager");
+    Serial.print("SDK Version: ");
+    Serial.println(ESP.getSdkVersion());
+
+    // Configure low power settings (but not too aggressive)
+    esp_wifi_set_ps(WIFI_PS_NONE); // Disable power saving for better responsiveness
     
     // Always start in AP mode first
     setupAPMode();
     
     // Try to connect to saved WiFi if credentials exist
     if (userSSID.length() > 0) {
-        Serial.println("Attempting to connect to saved WiFi...");
+        Serial.print("Attempting to connect to saved WiFi: '");
+        Serial.print(userSSID);
+        Serial.println("'");
+        
+        // Debug saved password length
+        Serial.print("Password length: ");
+        Serial.println(userPassword.length());
+        
         isConnected = connectToWiFi(userSSID, userPassword);
         
         if (isConnected) {
             Serial.println("Auto-connected to saved WiFi network");
         } else {
             Serial.println("Failed to auto-connect to saved WiFi");
+            Serial.println("Double check SSID and password");
         }
     }
     
-    // Setup web server
+    // Configure web server
+    // Set higher timeouts to prevent connection issues
+    server->enableCORS(true);
+    server->enableCrossOrigin(true);
+    
+    // Setup web server routes
     server->on("/", [this](){ this->handleRoot(); });
     server->on("/wifi", [this](){ this->handleWiFi(); });
     server->on("/connect", HTTP_POST, [this](){ this->handleConnect(); });
@@ -66,7 +113,18 @@ void WiFiManager::begin() {
     server->on("/force_ap", [this](){ this->handleForceAP(); });
     server->on("/ai_analysis", [this](){ this->handleAIAnalysis(); });
     server->on("/return_to_measurement", [this](){ this->handleReturnToMeasurement(); });
+    
+    // Add routes for common captive portal detection URLs
+    server->on("/generate_204", [this](){ this->handleRoot(); }); // Android captive portal
+    server->on("/mobile/status.php", [this](){ this->handleRoot(); }); // Another Android endpoint
+    server->on("/hotspot-detect.html", [this](){ this->handleRoot(); }); // iOS captive portal
+    server->on("/library/test/success.html", [this](){ this->handleRoot(); }); // iOS captive portal
+    server->on("/favicon.ico", HTTP_GET, [this](){ server->send(200, "image/x-icon", ""); }); // Handle favicon requests
+    
+    // Last catch-all handler
     server->onNotFound([this](){ this->handleNotFound(); });
+    
+    // Start the server
     server->begin();
     Serial.println("HTTP server started");
     
@@ -86,8 +144,18 @@ void WiFiManager::setupAPMode() {
         Serial.println("Using AP mode only");
     }
     
+    // Configure softAP with better parameters
     WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    WiFi.softAP(ap_ssid, ap_password);
+    
+    // Use a more reliable AP setup with channel specification
+    bool apSuccess = WiFi.softAP(ap_ssid, ap_password, 1, false, 4); // Channel 1, not hidden, max 4 connections
+    
+    if (!apSuccess) {
+        Serial.println("Failed to setup AP mode - trying again with default parameters");
+        WiFi.softAP(ap_ssid, ap_password);  // Try with default params
+    }
+    
+    delay(500); // Small delay to ensure AP is fully set up
     
     if (setupUICallback) {
         setupUICallback();
@@ -96,8 +164,16 @@ void WiFiManager::setupAPMode() {
     Serial.print("AP IP address: ");
     Serial.println(WiFi.softAPIP());
     
-    // Setup captive portal
-    dnsServer->start(53, "*", apIP);
+    // Stop any existing DNS server and restart it
+    dnsServer->stop();
+    // Setup captive portal with more reliable parameters
+    bool dnsStarted = dnsServer->start(53, "*", apIP);
+    
+    if (!dnsStarted) {
+        Serial.println("Failed to start DNS server");
+    } else {
+        Serial.println("DNS server started successfully");
+    }
     
     // Start MDNS responder
     if (MDNS.begin("healthsense")) {
@@ -109,27 +185,58 @@ void WiFiManager::setupAPMode() {
 
 bool WiFiManager::connectToWiFi(String ssid, String password) {
     if (ssid.length() == 0) {
+        Serial.println("Error: Empty SSID provided");
         return false;
     }
     
     Serial.println("Connecting to WiFi");
     Serial.print("SSID: ");
     Serial.println(ssid);
+    Serial.print("Password length: ");
+    Serial.println(password.length());
+    
+    // Disconnect from any previous WiFi
+    WiFi.disconnect(true);
+    delay(1000);
     
     // Use dual mode to maintain AP while connecting to WiFi
     WiFi.mode(WIFI_AP_STA);
+    
+    // Fix for ESP32 WiFi connection issues
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
+    
+    // Try to improve connection reliability
+    esp_wifi_set_ps(WIFI_PS_NONE); // Disable power saving
+    
+    // Begin connection attempt
+    Serial.println("Starting connection...");
     WiFi.begin(ssid.c_str(), password.c_str());
     
+    // Debug connection status
+    Serial.print("Initial connection status: ");
+    Serial.println(WiFi.status());
+    
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    int maxAttempts = 45;  // Increased timeout (22.5 seconds)
+    
+    Serial.println("Waiting for connection...");
+    while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
         delay(500);
         Serial.print(".");
+        
+        // Debug more frequently
+        if (attempts % 3 == 0) {
+            Serial.print(" [Status: ");
+            Serial.print(WiFi.status());
+            Serial.println("]");
+        }
         attempts++;
     }
     
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("");
-        Serial.println("WiFi connected");
+        Serial.println("WiFi connected successfully");
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
         Serial.print("AP IP address still available: ");
@@ -142,12 +249,37 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
         isConnected = true;
         return true;
     } else {
+        int wifiErrorCode = WiFi.status();
         Serial.println("");
-        Serial.println("WiFi connection failed");
+        Serial.print("WiFi connection failed with status: ");
+        Serial.println(wifiErrorCode);
+        
+        // Display error based on status code
+        switch (wifiErrorCode) {
+            case WL_NO_SSID_AVAIL:
+                Serial.println("SSID not available - Check network name");
+                break;
+            case WL_CONNECT_FAILED:
+                Serial.println("Invalid password or authentication failed");
+                break;
+            case WL_CONNECTION_LOST:
+                Serial.println("Connection lost");
+                break;
+            default:
+                Serial.println("Unknown error");
+                break;
+        }
         
         // If connection failed, ensure AP mode is still active
         if (!apModeActive) {
             setupAPMode();
+        }
+        
+        // Pass the specific error code to the connection status callback
+        if (updateConnectionStatusCallback) {
+            // Store the error code for later use in status page
+            lastWifiErrorCode = wifiErrorCode;
+            updateConnectionStatusCallback(false, false, isLoggedIn);
         }
         
         if (updateConnectionStatusCallback) {
@@ -161,39 +293,54 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
 void WiFiManager::readWiFiCredentials() {
     EEPROM.begin(EEPROM_SIZE);
     
-    // Read SSID
-    char ssid[64];
+    // Read SSID (properly null-terminated)
+    char ssid[65]; // +1 for null terminator
     for (int i = 0; i < 64; i++) {
         ssid[i] = EEPROM.read(SSID_ADDR + i);
     }
+    ssid[64] = 0; // Ensure null-termination
     userSSID = String(ssid);
     
-    // Read password
-    char password[64];
+    // Read password (properly null-terminated)
+    char password[65]; // +1 for null terminator
     for (int i = 0; i < 64; i++) {
         password[i] = EEPROM.read(PASS_ADDR + i);
     }
+    password[64] = 0; // Ensure null-termination
     userPassword = String(password);
     
     // Read mode
     isGuestMode = (EEPROM.read(MODE_ADDR) == 1);
     
-    // Read email
-    char email[64];
+    // Read email (properly null-terminated)
+    char email[65]; // +1 for null terminator
     for (int i = 0; i < 64; i++) {
         email[i] = EEPROM.read(EMAIL_ADDR + i);
     }
+    email[64] = 0; // Ensure null-termination
     userEmail = String(email);
     
-    // Read UID
-    char uid[64];
+    // Read UID (properly null-terminated)
+    char uid[65]; // +1 for null terminator
     for (int i = 0; i < 64; i++) {
         uid[i] = EEPROM.read(UID_ADDR + i);
     }
+    uid[64] = 0; // Ensure null-termination
     userUID = String(uid);
     
     // Set login status based on UID
     isLoggedIn = (userUID.length() > 0 && !isGuestMode);
+    
+    // Debug
+    Serial.println("Read WiFi Credentials from EEPROM");
+    Serial.print("SSID: '");
+    Serial.print(userSSID);
+    Serial.print("', Password length: ");
+    Serial.println(userPassword.length());
+    Serial.print("Guest Mode: ");
+    Serial.print(isGuestMode ? "YES" : "NO");
+    Serial.print(", Logged In: ");
+    Serial.println(isLoggedIn ? "YES" : "NO");
     
     EEPROM.end();
 }
@@ -201,26 +348,37 @@ void WiFiManager::readWiFiCredentials() {
 void WiFiManager::saveWiFiCredentials(String ssid, String password, bool guestMode) {
     EEPROM.begin(EEPROM_SIZE);
     
-    // Save SSID
+    // Debug
+    Serial.print("Saving WiFi SSID: '");
+    Serial.print(ssid);
+    Serial.print("', Password length: ");
+    Serial.println(password.length());
+    
+    // Save SSID (ensuring null termination)
     for (int i = 0; i < 64; i++) {
         if (i < ssid.length()) {
             EEPROM.write(SSID_ADDR + i, ssid[i]);
         } else {
-            EEPROM.write(SSID_ADDR + i, 0);
+            EEPROM.write(SSID_ADDR + i, 0); // Null terminate
         }
     }
     
-    // Save password
+    // Save password (ensuring null termination)
     for (int i = 0; i < 64; i++) {
         if (i < password.length()) {
             EEPROM.write(PASS_ADDR + i, password[i]);
         } else {
-            EEPROM.write(PASS_ADDR + i, 0);
+            EEPROM.write(PASS_ADDR + i, 0); // Null terminate
         }
     }
     
     // Save mode
     EEPROM.write(MODE_ADDR, guestMode ? 1 : 0);
+    
+    // Store the values in memory too
+    userSSID = ssid;
+    userPassword = password;
+    isGuestMode = guestMode;
     
     // If guest mode, clear email and UID
     if (guestMode) {
@@ -233,7 +391,12 @@ void WiFiManager::saveWiFiCredentials(String ssid, String password, bool guestMo
         isLoggedIn = false;
     }
     
-    EEPROM.commit();
+    if (!EEPROM.commit()) {
+        Serial.println("ERROR: EEPROM commit failed");
+    } else {
+        Serial.println("WiFi credentials saved successfully");
+    }
+    
     EEPROM.end();
 }
 
@@ -305,20 +468,9 @@ void WiFiManager::handleRoot() {
     // Otherwise show WiFi setup
     String html = "<!DOCTYPE html><html>"
                   "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<meta charset='UTF-8'>"
                   "<title>HealthSense WiFi Setup</title>"
-                  "<style>"
-                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
-                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-                  "h1 { color: #333; }"
-                  ".status { font-weight: bold; margin-bottom: 20px; }"
-                  ".connected { color: #4CAF50; }"
-                  ".disconnected { color: #f44336; }"
-                  "button, input[type='submit'] { background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 0; width: 100%; }"
-                  "button:hover, input[type='submit']:hover { background: #45a049; }"
-                  "input[type='text'], input[type='password'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }"
-                  ".guest-btn { background: #2196F3; }"
-                  ".guest-btn:hover { background: #0b7dda; }"
-                  "</style>"
+                  "<style>" + commonCSS + "</style>"
                   "</head>"
                   "<body>"
                   "<div class='container'>"
@@ -351,29 +503,21 @@ void WiFiManager::handleRoot() {
 void WiFiManager::handleWiFi() {
     String html = "<!DOCTYPE html><html>"
                   "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<meta charset='UTF-8'>"
                   "<title>HealthSense WiFi Setup</title>"
-                  "<style>"
-                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
-                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-                  "h1 { color: #333; }"
-                  "button, input[type='submit'] { background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 0; width: 100%; }"
-                  "button:hover, input[type='submit']:hover { background: #45a049; }"
-                  "input[type='text'], input[type='password'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }"
-                  ".back-btn { background: #f44336; }"
-                  ".back-btn:hover { background: #d32f2f; }"
-                  "</style>"
+                  "<style>" + commonCSS + "</style>"
                   "</head>"
                   "<body>"
                   "<div class='container'>"
-                  "<h1>Connect to WiFi</h1>"
+                  "<h1>Kết Nối WiFi</h1>"
                   "<form action='/connect' method='post'>"
-                  "<label for='ssid'>WiFi Network Name:</label><br>"
-                  "<input type='text' id='ssid' name='ssid' required><br>"
-                  "<label for='password'>WiFi Password:</label><br>"
-                  "<input type='password' id='password' name='password'><br>"
-                  "<input type='submit' value='Connect'>"
+                  "<label for='ssid'>Tên mạng WiFi:</label><br>"
+                  "<input type='text' id='ssid' name='ssid' placeholder='Nhập tên WiFi' required><br>"
+                  "<label for='password'>Mật khẩu WiFi:</label><br>"
+                  "<input type='password' id='password' name='password' placeholder='Nhập mật khẩu'><br>"
+                  "<input type='submit' value='Kết Nối'>"
                   "</form>"
-                  "<form action='/' method='get'><button type='submit' class='back-btn'>Back</button></form>"
+                  "<form action='/' method='get'><button type='submit' class='back-btn'>Quay Lại</button></form>"
                   "</div>"
                   "</body></html>";
     server->send(200, "text/html", html);
@@ -392,37 +536,76 @@ void WiFiManager::handleConnect() {
         
         String html = "<!DOCTYPE html><html>"
                     "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                    "<meta charset='UTF-8'>"
                     "<title>HealthSense WiFi Setup</title>"
-                    "<style>"
-                    "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
-                    ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-                    "h1 { color: #333; }"
-                    ".success { color: #4CAF50; }"
-                    ".error { color: #f44336; }"
+                    "<style>" + commonCSS + 
+                    ".success { color: #4CAF50; font-weight: bold; font-size: 18px; }"
+                    ".error { color: #f44336; font-weight: bold; font-size: 18px; }"
                     "</style>"
                     "</head>"
                     "<body>"
                     "<div class='container'>"
-                    "<h1>Connection Status</h1>";
+                    "<h1>Kết Quả Kết Nối</h1>";
         
         // Try to connect to the WiFi
+        Serial.println("Attempting WiFi connection from web interface...");
+        Serial.print("SSID: '");
+        Serial.print(ssid);
+        Serial.print("', Password length: ");
+        Serial.println(password.length());
+        
+        // Try connection twice in case of initial failure
         isConnected = connectToWiFi(ssid, password);
         
+        // If first attempt failed, reset WiFi and try again
+        if (!isConnected) {
+            Serial.println("First connection attempt failed, trying again after reset...");
+            WiFi.disconnect(true);
+            delay(1000);
+            isConnected = connectToWiFi(ssid, password);
+        }
+        
         if (isConnected) {
-            html += "<p class='success'>WiFi connected successfully!</p>"
-                    "<p>Connected to: " + ssid + "</p>"
-                    "<p>IP Address: " + WiFi.localIP().toString() + "</p>"
-                    "<p>You can also access this device at: " + WiFi.softAPIP().toString() + " (Hotspot)</p>"
-                    "<meta http-equiv='refresh' content='3;url=/mode'>"
-                    "<p>You will be redirected to mode selection in 3 seconds...</p>";
+            html += "<p class='success'>✅ Kết nối WiFi thành công!</p>"
+                    "<p>Đã kết nối tới mạng: <strong>" + ssid + "</strong></p>"
+                    "<p>Địa chỉ IP: " + WiFi.localIP().toString() + "</p>"
+                    "<p>Cường độ tín hiệu: " + String(WiFi.RSSI()) + " dBm</p>"
+                    "<meta http-equiv='refresh' content='5;url=/mode'>"
+                    "<p>Tự động chuyển đến trang chọn chế độ sau 5 giây...</p>";
             
             // Maintain dual mode (AP + STA) so hotspot remains available
             // This is already set in connectToWiFi function
         } else {
-            html += "<p class='error'>Failed to connect to WiFi!</p>"
-                    "<p>Please check your credentials and try again.</p>"
-                    "<meta http-equiv='refresh' content='3;url=/wifi'>"
-                    "<p>You will be redirected to WiFi setup in 3 seconds...</p>";
+            html += "<p class='error'>❌ Kết nối WiFi thất bại!</p>";
+            
+            // Show specific error message based on status code
+            switch (WiFi.status()) {
+                case WL_NO_SSID_AVAIL:
+                    html += "<p>Lỗi: Không tìm thấy mạng WiFi \"<strong>" + ssid + "</strong>\"</p>"
+                           "<p>Vui lòng kiểm tra tên mạng và đảm bảo mạng đang hoạt động.</p>";
+                    break;
+                case WL_CONNECT_FAILED:
+                    html += "<p>Lỗi: Sai mật khẩu hoặc xác thực thất bại</p>"
+                           "<p>Vui lòng kiểm tra lại mật khẩu WiFi của bạn.</p>";
+                    break;
+                case WL_CONNECTION_LOST:
+                    html += "<p>Lỗi: Mất kết nối trong quá trình thiết lập</p>"
+                           "<p>Tín hiệu WiFi có thể quá yếu. Hãy di chuyển thiết bị đến gần router WiFi hơn.</p>";
+                    break;
+                case WL_DISCONNECTED:
+                    html += "<p>Lỗi: Không thể kết nối - Router có thể đã từ chối kết nối</p>"
+                           "<p>Hãy kiểm tra cài đặt router và đảm bảo nó cho phép thêm thiết bị mới.</p>";
+                    break;
+                default:
+                    html += "<p>Mã lỗi: " + String(WiFi.status()) + "</p>"
+                           "<p>Lỗi không xác định. Hãy thử khởi động lại thiết bị và router WiFi.</p>";
+                    break;
+            }
+            
+            html += "<p>Vui lòng kiểm tra lại thông tin kết nối</p>"
+                    "<form action='/wifi' method='get'><button type='submit'>Thử lại</button></form>"
+                    "<meta http-equiv='refresh' content='10;url=/wifi'>"
+                    "<p>Tự động quay lại trang cấu hình WiFi sau 10 giây...</p>";
             
             // Ensure AP mode is active for reconfiguration
             if (!apModeActive) {
@@ -756,26 +939,50 @@ void WiFiManager::handleReconfigWiFi() {
 void WiFiManager::handleStatus() {
     String html = "<!DOCTYPE html><html>"
                   "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<meta charset='UTF-8'>"
                   "<title>HealthSense Connection Status</title>"
-                  "<style>"
-                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
-                  ".container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-                  "h1 { color: #333; }"
+                  "<style>" + commonCSS + 
                   ".status-info { text-align: left; background: #f9f9f9; padding: 15px; border-radius: 5px; margin: 15px 0; font-family: monospace; }"
-                  "button { background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 5px; }"
-                  "button:hover { background: #45a049; }"
-                  ".back-btn { background: #2196F3; }"
-                  ".back-btn:hover { background: #0b7dda; }"
-                  ".force-btn { background: #f44336; }"
-                  ".force-btn:hover { background: #d32f2f; }"
+                  ".error-banner { background-color: #ffebee; color: #d32f2f; padding: 10px; border-radius: 5px; border: 1px solid #ffcdd2; margin: 15px 0; }"
+                  ".success-banner { background-color: #e8f5e9; color: #388e3c; padding: 10px; border-radius: 5px; border: 1px solid #c8e6c9; margin: 15px 0; }"
                   ".refresh-btn { background: #FF9800; }"
                   ".refresh-btn:hover { background: #e68900; }"
+                  ".try-again-btn { background: #9c27b0; }"
+                  ".try-again-btn:hover { background: #7b1fa2; }"
+                  ".debug-section { margin-top: 20px; border-top: 1px dashed #ccc; padding-top: 15px; }"
+                  ".debug-title { font-weight: bold; color: #555; }"
+                  ".debug-info { font-family: monospace; background: #eee; padding: 10px; border-radius: 3px; text-align: left; white-space: pre-wrap; }"
                   "</style>"
                   "</head>"
                   "<body>"
                   "<div class='container'>"
-                  "<h1>Connection Status</h1>"
-                  "<div class='status-info'>";
+                  "<h1>Connection Status</h1>";
+                  
+    // Add connection status banner
+    if (isConnected) {
+        html += "<div class='success-banner'><strong>✅ WiFi Connected</strong> to " + userSSID + "</div>";
+    } else {
+        html += "<div class='error-banner'><strong>❌ WiFi Disconnected</strong> - ";
+        
+        // Show specific error based on WiFi status
+        switch (lastWifiErrorCode) {
+            case WL_NO_SSID_AVAIL:
+                html += "Network \"" + userSSID + "\" not found!";
+                break;
+            case WL_CONNECT_FAILED:
+                html += "Invalid password or authentication failed.";
+                break;
+            case WL_CONNECTION_LOST:
+                html += "Connection lost during setup.";
+                break;
+            default:
+                html += "Error code: " + String(lastWifiErrorCode);
+                break;
+        }
+        html += "</div>";
+    }
+                  
+    html += "<div class='status-info'>";
     
     // Add detailed connection information
     html += getConnectionInfo();
@@ -793,6 +1000,10 @@ void WiFiManager::handleStatus() {
             "<div style='margin-top: 30px;'>"
             "<form action='/' method='get' style='display: inline;'><button type='submit' class='back-btn'>Back to Home</button></form>"
             "<button onclick='location.reload()' class='refresh-btn'>Refresh Status</button>";
+    
+    if (!isConnected) {
+        html += "<form action='/wifi' method='get' style='display: inline;'><button type='submit' class='try-again-btn'>Try WiFi Setup Again</button></form>";
+    }
     
     if (isConnected) {
         html += "<form action='/force_ap' method='get' style='display: inline;'><button type='submit' class='force-btn'>Force Hotspot Only</button></form>";
@@ -832,8 +1043,43 @@ void WiFiManager::handleForceAP() {
 }
 
 void WiFiManager::handleNotFound() {
-    server->sendHeader("Location", "http://" + apIP.toString(), true);
-    server->send(302, "text/plain", "");
+    // Enhanced captive portal handling
+    Serial.print("Handling not found request for URI: ");
+    Serial.println(server->uri());
+
+    // Special handling for Apple devices captive portal detection
+    if (server->hostHeader() == "captive.apple.com") {
+        Serial.println("Apple captive portal detection - redirecting to success page");
+        server->send(200, "text/html", "<!DOCTYPE html><html><head><title>Success</title></head><body>Success</body></html>");
+        return;
+    }
+    
+    // For Android captive portal detection
+    if (server->hostHeader() == "connectivitycheck.gstatic.com" || 
+        server->hostHeader() == "connectivitycheck.android.com" ||
+        server->hostHeader() == "clients3.google.com") {
+        Serial.println("Android/Google captive portal detection - generating redirect");
+        server->send(200, "text/html", "<!DOCTYPE html><html><head><title>Success</title></head><body>Success</body></html>");
+        return;
+    }
+
+    // For all other requests, redirect to our web interface
+    String contentType = "text/html";
+    
+    // Respond with a simple HTML page for browsers
+    String message = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+    message += "<meta http-equiv='refresh' content='0;url=http://" + apIP.toString() + "/'>";
+    message += "<title>Redirecting...</title></head>";
+    message += "<body>Redirecting to <a href='http://" + apIP.toString() + "/'>HealthSense Setup</a>...</body></html>";
+    
+    // Set headers to ensure the redirect works and isn't cached
+    server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server->sendHeader("Pragma", "no-cache");
+    server->sendHeader("Expires", "-1");
+    server->sendHeader("Location", "http://" + apIP.toString() + "/", true);
+    
+    // Send 302 status with the HTML page as fallback
+    server->send(302, contentType, message);
 }
 
 void WiFiManager::loop() {
@@ -1344,16 +1590,43 @@ String WiFiManager::getConnectionInfo() const {
     if (isConnected) {
         info += "- Connected to: " + userSSID + "\n";
         info += "- Station IP: " + WiFi.localIP().toString() + "\n";
+        info += "- MAC Address: " + WiFi.macAddress() + "\n";
+        info += "- Signal Strength: " + String(WiFi.RSSI()) + " dBm\n";
+        info += "- DNS Server: " + WiFi.dnsIP().toString() + "\n";
     } else {
         info += "- Not connected to WiFi\n";
+        info += "- Last Error Code: " + String(lastWifiErrorCode) + "\n";
+        
+        // Add specific error descriptions
+        switch (lastWifiErrorCode) {
+            case WL_NO_SSID_AVAIL:
+                info += "  (SSID not available - check network name)\n";
+                break;
+            case WL_CONNECT_FAILED:
+                info += "  (Connection failed - check password)\n";
+                break;
+            case WL_DISCONNECTED:
+                info += "  (Disconnected or unable to connect)\n";
+                break;
+            case WL_CONNECTION_LOST:
+                info += "  (Connection was lost)\n";
+                break;
+        }
     }
     
     if (apModeActive) {
         info += "- Hotspot Active: " + String(ap_ssid) + "\n";
         info += "- Hotspot IP: " + WiFi.softAPIP().toString() + "\n";
+        info += "- AP MAC Address: " + WiFi.softAPmacAddress() + "\n";
+        info += "- Connected Clients: " + String(WiFi.softAPgetStationNum()) + "\n";
     } else {
         info += "- Hotspot: Inactive\n";
     }
+    
+    // Add system info
+    info += "\nSystem Info:\n";
+    info += "- Free Memory: " + String(ESP.getFreeHeap()) + " bytes\n";
+    info += "- SDK Version: " + String(ESP.getSdkVersion()) + "\n";
     
     return info;
 }
