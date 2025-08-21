@@ -23,7 +23,8 @@ WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password, const cha
     setupUICallback(nullptr),
     initializeSensorCallback(nullptr),
     updateConnectionStatusCallback(nullptr),
-    sendDataCallback(nullptr)
+    sendDataCallback(nullptr),
+    startNewMeasurementCallback(nullptr)
 {
     apIP = IPAddress(192, 168, 4, 1);
     server = new WebServer(80);
@@ -34,17 +35,20 @@ void WiFiManager::begin() {
     // Read saved WiFi credentials
     readWiFiCredentials();
     
-    // Always start in AP mode first to allow WiFi selection
+    // Always start in AP mode first
     setupAPMode();
     
     // Try to connect to saved WiFi if credentials exist
     if (userSSID.length() > 0) {
-        // This will maintain AP mode while also connecting to the station
-        connectToWiFi(userSSID, userPassword);
+        Serial.println("Attempting to connect to saved WiFi...");
+        isConnected = connectToWiFi(userSSID, userPassword);
+        
+        if (isConnected) {
+            Serial.println("Auto-connected to saved WiFi network");
+        } else {
+            Serial.println("Failed to auto-connect to saved WiFi");
+        }
     }
-    
-    // Ensure AP mode is active regardless of WiFi connection status
-    ensureAPMode();
     
     // Setup web server
     server->on("/", [this](){ this->handleRoot(); });
@@ -55,15 +59,30 @@ void WiFiManager::begin() {
     server->on("/login_submit", HTTP_POST, [this](){ this->handleLoginSubmit(); });
     server->on("/guest", [this](){ this->handleGuest(); });
     server->on("/measurement", [this](){ this->handleMeasurement(); });
+    server->on("/continue_measuring", [this](){ this->handleContinueMeasuring(); });
     server->on("/reconfigure_wifi", [this](){ this->handleReconfigWiFi(); });
+    server->on("/status", [this](){ this->handleStatus(); });
+    server->on("/force_ap", [this](){ this->handleForceAP(); });
     server->onNotFound([this](){ this->handleNotFound(); });
     server->begin();
     Serial.println("HTTP server started");
+    
+    // Print connection information
+    Serial.println("\n" + getConnectionInfo());
 }
 
 void WiFiManager::setupAPMode() {
     Serial.println("Setting up AP Mode");
-    WiFi.mode(WIFI_AP);
+    
+    // If WiFi is already connected, use dual mode (AP + STA)
+    if (WiFi.status() == WL_CONNECTED) {
+        WiFi.mode(WIFI_AP_STA);
+        Serial.println("Using dual mode (AP + Station)");
+    } else {
+        WiFi.mode(WIFI_AP);
+        Serial.println("Using AP mode only");
+    }
+    
     WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
     WiFi.softAP(ap_ssid, ap_password);
     
@@ -94,14 +113,8 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
     Serial.print("SSID: ");
     Serial.println(ssid);
     
-    // Set WiFi mode to both AP and STA to maintain both connections
+    // Use dual mode to maintain AP while connecting to WiFi
     WiFi.mode(WIFI_AP_STA);
-    
-    // Ensure AP is still running with our configuration
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    WiFi.softAP(ap_ssid, ap_password);
-    
-    // Connect to the provided network
     WiFi.begin(ssid.c_str(), password.c_str());
     
     int attempts = 0;
@@ -114,9 +127,9 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("");
         Serial.println("WiFi connected");
-        Serial.print("Station IP address: ");
+        Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
-        Serial.print("AP IP address: ");
+        Serial.print("AP IP address still available: ");
         Serial.println(WiFi.softAPIP());
         
         if (updateConnectionStatusCallback) {
@@ -128,6 +141,11 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
     } else {
         Serial.println("");
         Serial.println("WiFi connection failed");
+        
+        // If connection failed, ensure AP mode is still active
+        if (!apModeActive) {
+            setupAPMode();
+        }
         
         if (updateConnectionStatusCallback) {
             updateConnectionStatusCallback(false, false, isLoggedIn);
@@ -216,19 +234,6 @@ void WiFiManager::saveWiFiCredentials(String ssid, String password, bool guestMo
     EEPROM.end();
 }
 
-// New method to ensure AP is always running
-void WiFiManager::ensureAPMode() {
-    if (!apModeActive || WiFi.getMode() == WIFI_STA) {
-        Serial.println("Ensuring AP mode is active alongside STA mode");
-        WiFi.mode(WIFI_AP_STA);
-        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-        WiFi.softAP(ap_ssid, ap_password);
-        apModeActive = true;
-        Serial.print("AP IP address: ");
-        Serial.println(WiFi.softAPIP());
-    }
-}
-
 void WiFiManager::checkWiFiConnection() {
     // Only check periodically
     if ((millis() - lastWifiCheck < wifiCheckInterval)) {
@@ -237,33 +242,52 @@ void WiFiManager::checkWiFiConnection() {
     
     lastWifiCheck = millis();
     
-    // Always ensure AP is running for device access
-    ensureAPMode();
-    
-    // If we were connected but lost connection
+    // Check if we lost WiFi connection
     if (isConnected && WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi connection lost!");
         isConnected = false;
         
+        // Try to reconnect with saved credentials
+        if (userSSID.length() > 0) {
+            Serial.println("Attempting to reconnect...");
+            WiFi.mode(WIFI_AP_STA);
+            WiFi.begin(userSSID.c_str(), userPassword.c_str());
+            
+            // Give it a few seconds to reconnect
+            int attempts = 0;
+            while (WiFi.status() != WL_CONNECTED && attempts < 10) {
+                delay(500);
+                Serial.print(".");
+                attempts++;
+            }
+            
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.println("\nReconnected to WiFi!");
+                isConnected = true;
+                
+                if (updateConnectionStatusCallback) {
+                    updateConnectionStatusCallback(true, isGuestMode, isLoggedIn);
+                }
+                return;
+            } else {
+                Serial.println("\nFailed to reconnect");
+            }
+        }
+        
+        // Ensure AP mode is still active for reconfiguration
+        if (!apModeActive) {
+            setupAPMode();
+        }
+        
         if (updateConnectionStatusCallback) {
             updateConnectionStatusCallback(false, isGuestMode, isLoggedIn);
         }
-        
-        // Try to reconnect if we have credentials
-        if (userSSID.length() > 0) {
-            Serial.println("Attempting to reconnect to WiFi");
-            WiFi.begin(userSSID.c_str(), userPassword.c_str());
-        }
-    } else if (!isConnected && WiFi.status() == WL_CONNECTED) {
-        // We've reconnected
-        isConnected = true;
-        Serial.println("WiFi reconnected");
-        Serial.print("IP address: ");
-        Serial.println(WiFi.localIP());
-        
-        if (updateConnectionStatusCallback) {
-            updateConnectionStatusCallback(true, isGuestMode, isLoggedIn);
-        }
+    }
+    
+    // Check if we need to restart AP mode (in case it was disabled)
+    if (!apModeActive && WiFi.getMode() != WIFI_AP_STA && WiFi.getMode() != WIFI_AP) {
+        Serial.println("AP mode not active, restarting...");
+        setupAPMode();
     }
 }
 
@@ -299,19 +323,23 @@ void WiFiManager::handleRoot() {
     
     // Show WiFi status
     if (isConnected) {
-        html += "<p class='status connected'>WiFi Connected to: " + userSSID + "</p>"
-                "<p>Network IP Address: " + WiFi.localIP().toString() + "</p>";
+        html += "<p class='status connected'>WiFi Connected to: " + userSSID + "</p>";
+        html += "<p class='status'>Station IP: " + WiFi.localIP().toString() + "</p>";
     } else {
         html += "<p class='status disconnected'>WiFi Not Connected</p>";
     }
     
-    html += "<p>You can always access this device at: " + WiFi.softAPIP().toString() + "</p>"
-            "<p>Configure your WiFi connection:</p>"
+    html += "<p class='status'>Hotspot IP: " + WiFi.softAPIP().toString() + "</p>";
+    html += "<p style='font-size: 12px; color: #666;'>Access this device from both WiFi network and hotspot</p>";
+    
+    html += "<p>Configure your WiFi connection:</p>"
             "<form action='/wifi' method='get'><button type='submit'>Setup WiFi</button></form>";
     
     if (isConnected) {
         html += "<form action='/mode' method='get'><button type='submit'>Continue to Mode Selection</button></form>";
     }
+    
+    html += "<form action='/status' method='get'><button type='submit' class='guest-btn'>Connection Status</button></form>";
     
     html += "</div></body></html>";
     server->send(200, "text/html", html);
@@ -380,19 +408,23 @@ void WiFiManager::handleConnect() {
         if (isConnected) {
             html += "<p class='success'>WiFi connected successfully!</p>"
                     "<p>Connected to: " + ssid + "</p>"
-                    "<p>Network IP Address: " + WiFi.localIP().toString() + "</p>"
-                    "<p>You can also always access this device at: " + WiFi.softAPIP().toString() + "</p>"
+                    "<p>IP Address: " + WiFi.localIP().toString() + "</p>"
+                    "<p>You can also access this device at: " + WiFi.softAPIP().toString() + " (Hotspot)</p>"
                     "<meta http-equiv='refresh' content='3;url=/mode'>"
                     "<p>You will be redirected to mode selection in 3 seconds...</p>";
             
-            // The AP mode is already set in connectToWiFi
+            // Maintain dual mode (AP + STA) so hotspot remains available
+            // This is already set in connectToWiFi function
         } else {
             html += "<p class='error'>Failed to connect to WiFi!</p>"
                     "<p>Please check your credentials and try again.</p>"
                     "<meta http-equiv='refresh' content='3;url=/wifi'>"
                     "<p>You will be redirected to WiFi setup in 3 seconds...</p>";
             
-            apModeActive = true;
+            // Ensure AP mode is active for reconfiguration
+            if (!apModeActive) {
+                setupAPMode();
+            }
         }
         
         html += "</div></body></html>";
@@ -623,29 +655,30 @@ void WiFiManager::handleMeasurement() {
                   ".reconfigure-btn { background: #f44336; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin-top: 30px; width: 100%; }"
                   ".reconfigure-btn:hover { background: #d32f2f; }"
                   "</style>"
-                  "<script>"
-                  "function refreshReadings() {"
-                  "  // In a real implementation, this would fetch from an endpoint"
-                  "  // For this demo, we'll just reload the page every 10 seconds"
-                  "  setTimeout(function() { location.reload(); }, 10000);"
-                  "}"
-                  "window.onload = function() { refreshReadings(); }"
-                  "</script>"
                   "</head>"
                   "<body>"
                   "<div class='container'>"
                   "<h1>HealthSense Monitor</h1>";
     
     if (isLoggedIn) {
-        html += "<p class='user-status'>User Mode - Data is being saved</p>";
+        html += "<p class='user-status'>User Mode - Data is being saved to server</p>";
     } else {
         html += "<p class='guest-status'>Guest Mode - Data is not being saved</p>"
                 "<p>Register at: <a href='https://iot.newnol.io.vn' target='_blank'>HealthSense Portal</a></p>";
     }
     
-    html += "<p class='status'>Place your finger on the sensor to measure</p>"
+    html += "<p class='status'>Place your finger on the sensor to start measuring</p>"
+            "<p class='status'>Need 5 valid readings for final result</p>"
             "<div class='reading hr'>Heart Rate: <span id='hr'>--</span> BPM</div>"
-            "<div class='reading spo2'>SpO2: <span id='spo2'>--</span> %</div>";
+            "<div class='reading spo2'>SpO2: <span id='spo2'>--</span> %</div>"
+            "<div class='reading'>Progress: <span id='progress'>0/5</span> readings</div>";
+    
+    // Add continue measuring button
+    html += "<div style='margin: 20px 0;'>"
+            "<form action='/continue_measuring' method='get' style='display: inline;'>"
+            "<button type='submit' style='background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 5px;'>Start New Measurement</button>"
+            "</form>"
+            "</div>";
     
     // Show different buttons based on whether this is guest mode or user mode
     if (isGuestMode) {
@@ -668,6 +701,38 @@ void WiFiManager::handleMeasurement() {
     isMeasuring = true;
 }
 
+void WiFiManager::handleContinueMeasuring() {
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<title>HealthSense New Measurement</title>"
+                  "<style>"
+                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                  "h1 { color: #333; }"
+                  ".success { color: #4CAF50; }"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container'>"
+                  "<h1>New Measurement Started</h1>"
+                  "<p class='success'>Starting new measurement cycle...</p>"
+                  "<p>Place your finger on the sensor and keep it steady.</p>"
+                  "<p>The system will collect 5 valid readings and calculate the average.</p>"
+                  "<meta http-equiv='refresh' content='3;url=/measurement'>"
+                  "<p>You will be redirected to measurement page in 3 seconds...</p>"
+                  "</div>"
+                  "</body></html>";
+    
+    server->send(200, "text/html", html);
+    
+    // Trigger start of new measurement via callback
+    Serial.println("Web interface requested new measurement cycle");
+    
+    if (startNewMeasurementCallback) {
+        startNewMeasurementCallback();
+    }
+}
+
 void WiFiManager::handleReconfigWiFi() {
     // Stop measuring when reconfiguring WiFi
     isMeasuring = false;
@@ -680,6 +745,84 @@ void WiFiManager::handleReconfigWiFi() {
     if (updateConnectionStatusCallback) {
         updateConnectionStatusCallback(isConnected, false, false);
     }
+}
+
+void WiFiManager::handleStatus() {
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<title>HealthSense Connection Status</title>"
+                  "<style>"
+                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                  ".container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                  "h1 { color: #333; }"
+                  ".status-info { text-align: left; background: #f9f9f9; padding: 15px; border-radius: 5px; margin: 15px 0; font-family: monospace; }"
+                  "button { background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 5px; }"
+                  "button:hover { background: #45a049; }"
+                  ".back-btn { background: #2196F3; }"
+                  ".back-btn:hover { background: #0b7dda; }"
+                  ".force-btn { background: #f44336; }"
+                  ".force-btn:hover { background: #d32f2f; }"
+                  ".refresh-btn { background: #FF9800; }"
+                  ".refresh-btn:hover { background: #e68900; }"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container'>"
+                  "<h1>Connection Status</h1>"
+                  "<div class='status-info'>";
+    
+    // Add detailed connection information
+    html += getConnectionInfo();
+    
+    html += "</div>"
+            "<p><strong>How to Connect:</strong></p>"
+            "<ul style='text-align: left; margin: 20px 0;'>";
+    
+    if (isConnected) {
+        html += "<li>Via WiFi Network: Connect to '" + userSSID + "' and access " + WiFi.localIP().toString() + "</li>";
+    }
+    
+    html += "<li>Via Hotspot: Connect to '" + String(ap_ssid) + "' and access " + WiFi.softAPIP().toString() + "</li>"
+            "</ul>"
+            "<div style='margin-top: 30px;'>"
+            "<form action='/' method='get' style='display: inline;'><button type='submit' class='back-btn'>Back to Home</button></form>"
+            "<button onclick='location.reload()' class='refresh-btn'>Refresh Status</button>";
+    
+    if (isConnected) {
+        html += "<form action='/force_ap' method='get' style='display: inline;'><button type='submit' class='force-btn'>Force Hotspot Only</button></form>";
+    }
+    
+    html += "</div>"
+            "</div>"
+            "</body></html>";
+    
+    server->send(200, "text/html", html);
+}
+
+void WiFiManager::handleForceAP() {
+    forceAPMode();
+    
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<title>HealthSense Force AP Mode</title>"
+                  "<style>"
+                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                  "h1 { color: #333; }"
+                  ".success { color: #4CAF50; }"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container'>"
+                  "<h1>AP Mode Forced</h1>"
+                  "<p class='success'>Device is now in Access Point mode only.</p>"
+                  "<p>WiFi connection has been disconnected.</p>"
+                  "<meta http-equiv='refresh' content='3;url=/'>"
+                  "<p>You will be redirected to home in 3 seconds...</p>"
+                  "</div>"
+                  "</body></html>";
+    
+    server->send(200, "text/html", html);
 }
 
 void WiFiManager::handleNotFound() {
@@ -710,6 +853,10 @@ void WiFiManager::setUpdateConnectionStatusCallback(void (*callback)(bool connec
 
 void WiFiManager::setSendDataCallback(void (*callback)(String uid, int32_t heartRate, int32_t spo2)) {
     sendDataCallback = callback;
+}
+
+void WiFiManager::setStartNewMeasurementCallback(void (*callback)()) {
+    startNewMeasurementCallback = callback;
 }
 
 void WiFiManager::saveUserCredentials(String email, String uid) {
@@ -864,25 +1011,223 @@ bool WiFiManager::sendMeasurementData(String uid, int32_t heartRate, int32_t spo
     return (httpCode == HTTP_CODE_OK);
 }
 
+
+bool WiFiManager::sendDeviceData(int32_t heartRate, int32_t spo2, String userId) {
+    if (!isConnected) {
+        Serial.println(F("❌ Not connected to WiFi, cannot send data"));
+        return false;
+    }
+    
+    Serial.println(F("🌐 Preparing to send device data..."));
+    
+    HTTPClient http;
+    String url = serverURL;
+    if (!url.endsWith("/")) {
+        url += "/";
+    }
+    url += "api/records";
+    
+    Serial.print(F("📍 URL: "));
+    Serial.println(url);
+    
+    // Use a try-catch-like approach for safer execution
+    bool initSuccess = false;
+    try {
+        initSuccess = http.begin(url);
+    } catch (...) {
+        Serial.println(F("❌ Failed to initialize HTTP client"));
+        return false;
+    }
+    
+    if (!initSuccess) {
+        Serial.println(F("❌ HTTP client initialization failed"));
+        return false;
+    }
+    
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-Device-Id", DEVICE_ID);
+    http.addHeader("X-Device-Secret", DEVICE_SECRET);
+    
+    // Add user ID header if provided
+    if (userId.length() > 0) {
+        http.addHeader("X-User-Id", userId);
+        Serial.print(F("👤 User ID: "));
+        Serial.println(userId);
+    }
+    
+    // Create JSON payload with correct field names
+    DynamicJsonDocument doc(200);
+    doc["heart_rate"] = heartRate;
+    doc["spo2"] = spo2;
+    String payload;
+    serializeJson(doc, payload);
+    
+    Serial.print(F("📦 Payload: "));
+    Serial.println(payload);
+    
+    // Send POST request with timeout
+    int httpCode = -1;
+    try {
+        http.setTimeout(10000); // 10 second timeout
+        httpCode = http.POST(payload);
+    } catch (...) {
+        Serial.println(F("❌ HTTP POST request failed (exception)"));
+        http.end();
+        return false;
+    }
+    
+    Serial.print(F("📡 Response code: "));
+    Serial.println(httpCode);
+    
+    bool success = false;
+    if (httpCode == HTTP_CODE_OK) {
+        String response = http.getString();
+        Serial.print(F("✅ Success! Response: "));
+        Serial.println(response);
+        success = true;
+    } else if (httpCode > 0) {
+        String response = http.getString();
+        Serial.print(F("❌ HTTP error "));
+        Serial.print(httpCode);
+        Serial.print(F(". Response: "));
+        Serial.println(response);
+    } else {
+        Serial.print(F("❌ Connection error: "));
+        Serial.println(http.errorToString(httpCode));
+    }
+    
+    http.end();
+    Serial.println(F("🔚 HTTP client closed"));
+    return success;
+}
+
+
 void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
-    if (isMeasuring) {
-        // If in guest mode, no need to send to server
-        if (isGuestMode) {
-            // Just call the callback if it exists
-            if (sendDataCallback) {
-                sendDataCallback("guest", heartRate, spo2);
-            }
-            return;
+    Serial.println(F("🔄 sendSensorData() called"));
+    Serial.print(F("Parameters - HR: "));
+    Serial.print(heartRate);
+    Serial.print(F(", SpO2: "));
+    Serial.println(spo2);
+    Serial.print(F("State - isMeasuring: "));
+    Serial.print(isMeasuring);
+    Serial.print(F(", isLoggedIn: "));
+    Serial.print(isLoggedIn);
+    Serial.print(F(", isGuestMode: "));
+    Serial.print(isGuestMode);
+    Serial.print(F(", userUID length: "));
+    Serial.println(userUID.length());
+    
+    // Only send data if measuring and user is logged in (not guest mode)
+    if (isMeasuring && isLoggedIn && !isGuestMode && userUID.length() > 0) {
+        Serial.println(F("📤 Sending measurement data to server (User mode)"));
+        bool success = sendDeviceData(heartRate, spo2, userUID);
+        if (success) {
+            Serial.println(F("✅ Data sent successfully"));
+        } else {
+            Serial.println(F("❌ Failed to send data"));
         }
         
-        // If logged in, send to server
-        if (isLoggedIn && userUID.length() > 0) {
-            sendMeasurementData(userUID, heartRate, spo2);
-            
-            // Call callback if it exists
-            if (sendDataCallback) {
-                sendDataCallback(userUID, heartRate, spo2);
-            }
+        // Call callback if it exists
+        if (sendDataCallback) {
+            Serial.println(F("🔔 Calling sendDataCallback for user mode"));
+            sendDataCallback(userUID, heartRate, spo2);
         }
+    } else if (isMeasuring && isGuestMode) {
+        Serial.println(F("👤 Guest mode - not sending data to server"));
+        
+        // Call callback for guest mode (for local display only)
+        if (sendDataCallback) {
+            Serial.println(F("🔔 Calling sendDataCallback for guest mode"));
+            sendDataCallback("guest", heartRate, spo2);
+        }
+    } else if (isMeasuring && !isLoggedIn) {
+        Serial.println(F("🔒 User not logged in - not sending data to server"));
+        
+        // Call callback for anonymous mode (for local display only)
+        if (sendDataCallback) {
+            Serial.println(F("🔔 Calling sendDataCallback for anonymous mode"));
+            sendDataCallback("anonymous", heartRate, spo2);
+        }
+    } else {
+        Serial.println(F("⚠️ Conditions not met for sending data"));
+        Serial.print(F("  - isMeasuring: "));
+        Serial.println(isMeasuring ? "true" : "false");
+        Serial.print(F("  - isLoggedIn: "));
+        Serial.println(isLoggedIn ? "true" : "false");
+        Serial.print(F("  - isGuestMode: "));
+        Serial.println(isGuestMode ? "true" : "false");
+        Serial.print(F("  - userUID: '"));
+        Serial.print(userUID);
+        Serial.println(F("'"));
+    }
+    
+    // Reset measurement state after data is sent
+    isMeasuring = false;
+    Serial.println(F("🛑 Measurement state reset - ready for new measurement"));
+    
+    Serial.println(F("🏁 sendSensorData() completed"));
+}
+String WiFiManager::getConnectionInfo() const {
+    String info = "Connection Status:\n";
+    info += "- WiFi Mode: ";
+    
+    switch (WiFi.getMode()) {
+        case WIFI_AP:
+            info += "Access Point Only\n";
+            break;
+        case WIFI_STA:
+            info += "Station Only\n";
+            break;
+        case WIFI_AP_STA:
+            info += "Dual Mode (AP + Station)\n";
+            break;
+        default:
+            info += "Off\n";
+            break;
+    }
+    
+    if (isConnected) {
+        info += "- Connected to: " + userSSID + "\n";
+        info += "- Station IP: " + WiFi.localIP().toString() + "\n";
+    } else {
+        info += "- Not connected to WiFi\n";
+    }
+    
+    if (apModeActive) {
+        info += "- Hotspot Active: " + String(ap_ssid) + "\n";
+        info += "- Hotspot IP: " + WiFi.softAPIP().toString() + "\n";
+    } else {
+        info += "- Hotspot: Inactive\n";
+    }
+    
+    return info;
+}
+
+void WiFiManager::forceAPMode() {
+    Serial.println("Forcing AP mode...");
+    WiFi.disconnect();
+    isConnected = false;
+    setupAPMode();
+    
+    if (updateConnectionStatusCallback) {
+        updateConnectionStatusCallback(false, isGuestMode, isLoggedIn);
+    }
+}
+
+void WiFiManager::restartWiFi() {
+    Serial.println("Restarting WiFi...");
+    WiFi.disconnect();
+    delay(1000);
+    
+    isConnected = false;
+    
+    // Try to reconnect with saved credentials
+    if (userSSID.length() > 0) {
+        isConnected = connectToWiFi(userSSID, userPassword);
+    }
+    
+    // Ensure AP mode is active
+    if (!apModeActive) {
+        setupAPMode();
     }
 }

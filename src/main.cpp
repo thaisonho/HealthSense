@@ -3,9 +3,6 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
-// Include common types
-#include "common_types.h"
-
 // Include managers
 #include "wifi_manager.h"
 #include "display_manager.h"
@@ -59,42 +56,71 @@ void setup() {
   wifiManager.setInitializeSensorCallback(initializeSensor);
   wifiManager.setUpdateConnectionStatusCallback(updateConnectionStatus);
   wifiManager.setSendDataCallback(sendSensorData);
+  wifiManager.setStartNewMeasurementCallback([]() {
+    Serial.println(F("Starting new measurement from web interface..."));
+    if (sensorManager.isReady()) {
+      sensorManager.startMeasurement();
+    }
+  });
   
-  // Set up callbacks for sensor manager with phase information
-  sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2, MeasurementPhase phase) {
-    // Always update the display with current readings, validity flags and measurement phase
-    display.updateSensorReadings(hr, validHR, spo2, validSPO2, phase);
+  // Set up callbacks for sensor manager
+  sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2) {
+    // Always update the display with current readings and validity flags
+    display.updateSensorReadings(hr, validHR, spo2, validSPO2);
     
-    // Only send valid readings to the server in RELIABLE phase
-    if (validHR && validSPO2 && phase == PHASE_RELIABLE) {
-      // Add additional validation checks using physiological constants
-      if (hr >= MIN_VALID_HR && hr <= MAX_VALID_HR && 
-          spo2 >= MIN_VALID_SPO2 && spo2 <= MAX_VALID_SPO2) {
-        Serial.println(F("Reliable readings detected, sending to server"));
-        wifiManager.sendSensorData(hr, spo2);
-      } else {
-        Serial.println(F("Readings outside physiological range, not sending"));
-      }
-    } else if (phase != PHASE_RELIABLE) {
-      // Log the current measurement phase
-      Serial.print(F("In measurement phase: "));
-      switch (phase) {
-        case PHASE_INIT:
-          Serial.println(F("INITIALIZATION (warming up)"));
-          break;
-        case PHASE_STABILIZE:
-          Serial.println(F("STABILIZATION (acquiring stable signal)"));
-          break;
-        default:
-          Serial.println(F("UNKNOWN"));
-      }
-    } else {
-      Serial.println(F("Invalid readings, not sending to server"));
+    // Log current readings for monitoring
+    if (validHR && validSPO2) {
+      Serial.print(F("Current valid reading: HR="));
+      Serial.print(hr);
+      Serial.print(F(", SpO2="));
+      Serial.println(spo2);
     }
   });
   
   sensorManager.setUpdateFingerStatusCallback([](bool fingerDetected) {
     display.showFingerStatus(fingerDetected);
+    
+    // Start measurement when finger is detected (if not already measuring)
+    if (fingerDetected && !sensorManager.isMeasurementInProgress() && 
+        wifiManager.isMeasurementActive()) {
+      Serial.println(F("👆 Finger detected, starting measurement..."));
+      Serial.print(F("📊 Measurement states - Sensor measuring: "));
+      Serial.print(sensorManager.isMeasurementInProgress() ? "YES" : "NO");
+      Serial.print(F(", WiFi measurement active: "));
+      Serial.println(wifiManager.isMeasurementActive() ? "YES" : "NO");
+      sensorManager.startMeasurement();
+    } else if (fingerDetected && sensorManager.isMeasurementInProgress()) {
+      Serial.println(F("👆 Finger detected but measurement already in progress"));
+    } else if (fingerDetected && !wifiManager.isMeasurementActive()) {
+      Serial.println(F("👆 Finger detected but no measurement requested from web interface"));
+    }
+    
+    // If finger is removed during measurement, warn but continue measuring
+    if (!fingerDetected && sensorManager.isMeasurementInProgress()) {
+      Serial.print(F("⚠️  Finger removed during measurement! Progress: "));
+      Serial.print(sensorManager.getValidReadingCount());
+      Serial.print(F("/"));
+      Serial.print(REQUIRED_VALID_READINGS);
+      Serial.println(F(" - Please keep finger on sensor"));
+    }
+  });
+  
+  // Set callback for when measurement is complete (5 valid readings collected)
+  sensorManager.setMeasurementCompleteCallback([](int32_t avgHR, int32_t avgSpO2) {
+    Serial.println(F("=== MEASUREMENT COMPLETE CALLBACK ==="));
+    Serial.print(F("Final averaged HR: "));
+    Serial.println(avgHR);
+    Serial.print(F("Final averaged SpO2: "));
+    Serial.println(avgSpO2);
+    
+    // Update display with final results
+    display.updateSensorReadings(avgHR, true, avgSpO2, true);
+    
+    // Send final averaged data to server (only if in user mode and logged in)
+    wifiManager.sendSensorData(avgHR, avgSpO2);
+    
+    Serial.println(F("Measurement cycle complete. Sensor stopped."));
+    Serial.println(F("Press 'Start New Measurement' to measure again."));
   });
   
   // Begin WiFi manager (will set up AP mode)
@@ -139,22 +165,31 @@ void loop() {
         break;
       }
       
-      // Only start sensor readings when in measuring state, sensor is ready, and we should be measuring
+      // Only process sensor readings when in measuring state, sensor is ready, and we should be measuring
+      static bool initialReadingDone = false;
+      
       if (sensorManager.isReady() && wifiManager.isMeasurementActive()) {
-        static bool firstReading = true;
         
-        if (firstReading) {
-          display.showMeasuringStatus(PHASE_INIT);
+        if (!initialReadingDone) {
+          display.showMeasuringStatus();
           sensorManager.readSensor();
-          firstReading = false;
-        } else {
-          sensorManager.processReadings();
+          initialReadingDone = true;
         }
-      } else if (wifiManager.isMeasurementActive() && !sensorManager.isReady()) {
-        // If we're supposed to be measuring but sensor isn't ready,
-        // try to reinitialize it
-        sensorManager.initializeSensor();
-        delay(100);
+        
+        // Always continue processing readings for continuous measurement
+        // This will keep collecting samples until we have 5 valid readings
+        sensorManager.processReadings();
+        
+      } else {
+        // Reset flag when measurement is not active
+        initialReadingDone = false;
+        
+        if (wifiManager.isMeasurementActive() && !sensorManager.isReady()) {
+          // If we're supposed to be measuring but sensor isn't ready,
+          // try to reinitialize it
+          sensorManager.initializeSensor();
+          delay(100);
+        }
       }
       break;
   }
@@ -170,6 +205,10 @@ void initializeSensor() {
   display.setupSensorUI();
   sensorManager.initializeSensor();
   sensorManager.setReady(true);
+  
+  // Start a new measurement cycle when sensor is initialized
+  Serial.println(F("Sensor initialized, ready for measurement when finger is detected"));
+  
   currentState = STATE_MEASURING;
 }
 
