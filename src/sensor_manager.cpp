@@ -11,11 +11,6 @@ SensorManager::SensorManager(int bufferSize) :
     i2cErrorCount(0),
     sda_pin(0),
     scl_pin(0),
-    phase(PHASE_INIT),
-    fingerPlacedTime(0),
-    lastValidTime(0),
-    consecutiveValid(0),
-    lastFingerDetected(false),
     updateReadingsCallback(nullptr),
     updateFingerStatusCallback(nullptr) {
     
@@ -167,7 +162,7 @@ void SensorManager::readSensor() {
     
     // Update the readings via callback
     if (updateReadingsCallback) {
-        updateReadingsCallback(heartRate, validHeartRate, spo2, validSPO2, phase);
+        updateReadingsCallback(heartRate, validHeartRate, spo2, validSPO2);
     }
     
     // Update finger status via callback
@@ -253,26 +248,33 @@ void SensorManager::resetSensor() {
 
 void SensorManager::processReadings() {
     if (!sensorReady) {
+        // Try to reinitialize sensor if it's not ready
         resetSensor();
         return;
     }
-
-    // Sliding window for new samples
+    
+    // Dumping the first 25 sets of samples in the memory and shift the last 75 sets of samples to the top
     for (byte i = 25; i < 100; i++) {
         redBuffer[i - 25] = redBuffer[i];
         irBuffer[i - 25] = irBuffer[i];
     }
 
+    // Take 25 sets of samples before calculating the heart rate.
     int errorCount = 0;
     for (byte i = 75; i < 100; i++) {
         bool readSuccess = false;
         int retryCount = 0;
+        
+        // Try to read the sensor with retries
         while (!readSuccess && retryCount < 3) {
             try {
+                // Check if sensor has data
                 if (!particleSensor->available()) {
                     particleSensor->check();
+                    // Wait a bit for data to become available
                     delay(10);
                 }
+                
                 if (particleSensor->available()) {
                     redBuffer[i] = particleSensor->getRed();
                     irBuffer[i] = particleSensor->getIR();
@@ -280,103 +282,67 @@ void SensorManager::processReadings() {
                     readSuccess = true;
                 }
             } catch (...) {
+                // Catch any exceptions during sensor reading
+                Serial.println(F("Error reading sensor data"));
                 errorCount++;
                 delay(10);
             }
+            
             retryCount++;
         }
-        if (!readSuccess && i > 0) {
-            redBuffer[i] = redBuffer[i-1];
-            irBuffer[i] = irBuffer[i-1];
+        
+        // If we couldn't read after retries, use previous values
+        if (!readSuccess) {
+            if (i > 0) {
+                redBuffer[i] = redBuffer[i-1];
+                irBuffer[i] = irBuffer[i-1];
+            }
         }
+        
+        // Send samples and calculation result to terminal program through UART
+        Serial.print(F("red="));
+        Serial.print(redBuffer[i], DEC);
+        Serial.print(F(", ir="));
+        Serial.print(irBuffer[i], DEC);
+
+        Serial.print(F(", HR="));
+        Serial.print(heartRate, DEC);
+
+        Serial.print(F(", HRvalid="));
+        Serial.print(validHeartRate, DEC);
+
+        Serial.print(F(", SPO2="));
+        Serial.print(spo2, DEC);
+
+        Serial.print(F(", SPO2Valid="));
+        Serial.println(validSPO2, DEC);
     }
+    
+    // Check if we encountered too many errors
     if (errorCount > 10) {
         Serial.println(F("Too many sensor read errors. Resetting sensor..."));
         resetSensor();
         return;
     }
 
+    // After gathering 25 new samples recalculate HR and SP02
     maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+    
+    // Additional validation for extreme HR values
     if (heartRate > MAX_VALID_HR || heartRate < MIN_VALID_HR) {
+        // If heart rate is outside physiological range, mark it as invalid
         validHeartRate = 0;
+        Serial.println(F("Heart rate outside physiological range, marked as invalid"));
     }
-
-    // --- Staged measurement logic ---
-    bool fingerDetected = isFingerDetected();
-    unsigned long now = millis();
-
-    if (!fingerDetected) {
-        // Finger removed, reset state
-        phase = PHASE_INIT;
-        fingerPlacedTime = 0;
-        lastValidTime = 0;
-        consecutiveValid = 0;
-        lastFingerDetected = false;
-        if (updateReadingsCallback) {
-            updateReadingsCallback(0, false, 0, false, phase); // Show nothing
-        }
-        if (updateFingerStatusCallback) {
-            updateFingerStatusCallback(false);
-        }
-        return;
+    
+    // Update the readings via callback
+    if (updateReadingsCallback) {
+        updateReadingsCallback(heartRate, validHeartRate, spo2, validSPO2);
     }
-
-    if (!lastFingerDetected && fingerDetected) {
-        // Finger just placed
-        fingerPlacedTime = now;
-        phase = PHASE_INIT;
-        consecutiveValid = 0;
-        lastValidTime = 0;
-    }
-    lastFingerDetected = fingerDetected;
-
-    // Phase transitions
-    switch (phase) {
-        case PHASE_INIT:
-            if (now - fingerPlacedTime >= SETTLING_TIME_MS) {
-                phase = PHASE_STABILIZE;
-            }
-            if (updateReadingsCallback) {
-                updateReadingsCallback(0, false, 0, false, phase); // Show "warming up"
-            }
-            break;
-        case PHASE_STABILIZE:
-            if (validSPO2 && validHeartRate) {
-                consecutiveValid++;
-                if (consecutiveValid >= REQUIRED_VALID_COUNT) {
-                    lastValidTime = now;
-                    phase = PHASE_RELIABLE;
-                }
-            } else {
-                consecutiveValid = 0;
-            }
-            if (updateReadingsCallback) {
-                // Optionally show as "stabilizing" with current values
-                updateReadingsCallback(heartRate, validHeartRate, spo2, validSPO2, phase);
-            }
-            break;
-        case PHASE_RELIABLE:
-            // Remain in reliable phase as long as finger is present and valid
-            if (validSPO2 && validHeartRate) {
-                lastValidTime = now;
-                if (updateReadingsCallback) {
-                    updateReadingsCallback(heartRate, true, spo2, true, phase);
-                }
-            } else {
-                // If we lose validity for too long, go back to stabilize
-                if (now - lastValidTime > 2000) {
-                    phase = PHASE_STABILIZE;
-                    consecutiveValid = 0;
-                }
-                if (updateReadingsCallback) {
-                    updateReadingsCallback(heartRate, false, spo2, false, phase);
-                }
-            }
-            break;
-    }
-
+    
+    // Update finger status via callback
     if (updateFingerStatusCallback) {
-        updateFingerStatusCallback(fingerDetected);
+        updateFingerStatusCallback(isFingerDetected());
     }
 }
 
@@ -422,7 +388,7 @@ bool SensorManager::isFingerDetected() const {
     return signalPresent && properRatio;
 }
 
-void SensorManager::setUpdateReadingsCallback(void (*callback)(int32_t hr, bool validHR, int32_t spo2, bool validSPO2, MeasurementPhase phase)) {
+void SensorManager::setUpdateReadingsCallback(void (*callback)(int32_t hr, bool validHR, int32_t spo2, bool validSPO2)) {
     updateReadingsCallback = callback;
 }
 

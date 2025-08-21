@@ -1,0 +1,13 @@
+--- .pio/libdeps/esp32dev/SparkFun MAX3010x Pulse and Proximity Sensor Library/src/MAX30105.h
++++ .pio/libdeps/esp32dev/SparkFun MAX3010x Pulse and Proximity Sensor Library/src/MAX30105.h
+@@ -29,6 +29,10 @@
+   //SAMD21 uses RingBuffer.h
+   #define I2C_BUFFER_LENGTH SERIAL_BUFFER_SIZE
+ 
++#elif defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
++  // ESP32 already defines I2C_BUFFER_LENGTH in Wire.h, so we'll use that value
++  // No need to redefine
++
+ #else
+ 
+   //The catch-all default is 32

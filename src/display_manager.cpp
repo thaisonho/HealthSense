@@ -155,7 +155,7 @@ void DisplayManager::setupSensorUI() {
     tft->println("Visit to reconfigure WiFi");
 }
 
-void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2, MeasurementPhase phase) {
+void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2) {
     // Clear previous readings
     tft->fillRect(75, 90, 80, 10, ST7735_BLACK);  // Clear heart rate value area
     tft->fillRect(45, 110, 80, 10, ST7735_BLACK); // Clear SpO2 value area
@@ -163,9 +163,7 @@ void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32
     // Display heart rate
     tft->setCursor(75, 90);
     tft->setTextColor(ST7735_RED);
-    
-    // Only show valid readings in RELIABLE phase
-    if (validHR && phase == PHASE_RELIABLE) {
+    if (validHR) {
         tft->print(heartRate);
         tft->print(" BPM");
     } else {
@@ -175,45 +173,19 @@ void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32
     // Display SpO2
     tft->setCursor(45, 110);
     tft->setTextColor(ST7735_BLUE);
-    if (validSPO2 && phase == PHASE_RELIABLE) {
+    if (validSPO2) {
         tft->print(spo2);
         tft->print(" %");
     } else {
         tft->print("-- %");
     }
-    
-    // Update the measurement status based on the phase
-    showMeasuringStatus(phase);
 }
 
-void DisplayManager::showMeasuringStatus(MeasurementPhase phase) {
+void DisplayManager::showMeasuringStatus() {
     tft->fillRect(5, 130, 160, 10, ST7735_BLACK);
     tft->setCursor(5, 130);
-    
-    switch (phase) {
-        case PHASE_INIT:
-            // Initial phase - warming up (first 1-3 seconds)
-            tft->setTextColor(ST7735_YELLOW);
-            tft->print("Warming up...");
-            break;
-            
-        case PHASE_STABILIZE:
-            // Stabilization phase (next 3-8 seconds)
-            tft->setTextColor(ST7735_CYAN);
-            tft->print("Stabilizing signal...");
-            break;
-            
-        case PHASE_RELIABLE:
-            // Reliable results phase (after 5-10 seconds)
-            tft->setTextColor(ST7735_GREEN);
-            tft->print("Reliable reading");
-            break;
-            
-        default:
-            tft->setTextColor(ST7735_GREEN);
-            tft->print("Measuring...");
-            break;
-    }
+    tft->setTextColor(ST7735_GREEN);
+    tft->print("Measuring...");
 }
 
 void DisplayManager::showFingerStatus(bool fingerDetected) {

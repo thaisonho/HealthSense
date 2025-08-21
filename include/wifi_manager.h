@@ -45,6 +45,8 @@ private:
     void handleGuest();
     void handleMeasurement();
     void handleReconfigWiFi();
+    void handleStatus();
+    void handleForceAP();
     void handleNotFound();
     
     // API communication
@@ -58,7 +60,6 @@ public:
     void setupAPMode();
     bool connectToWiFi(String ssid, String password);
     void checkWiFiConnection();
-    void ensureAPMode();
     void readWiFiCredentials();
     void saveWiFiCredentials(String ssid, String password, bool guestMode);
     void saveUserCredentials(String email, String uid);
@@ -79,10 +80,16 @@ public:
     String getSSID() const { return userSSID; }
     String getUserUID() const { return userUID; }
     IPAddress getAPIP() const { return apIP; }
+    IPAddress getStationIP() const { return WiFi.localIP(); }
+    String getConnectionInfo() const;
     
     // Control measurement state
     void startMeasurement() { isMeasuring = true; }
     void stopMeasurement() { isMeasuring = false; }
+    
+    // Utility functions
+    void forceAPMode();
+    void restartWiFi();
 };
 
 #endif // WIFI_MANAGER_H

@@ -34,17 +34,20 @@ void WiFiManager::begin() {
     // Read saved WiFi credentials
     readWiFiCredentials();
     
-    // Always start in AP mode first to allow WiFi selection
+    // Always start in AP mode first
     setupAPMode();
     
     // Try to connect to saved WiFi if credentials exist
     if (userSSID.length() > 0) {
-        // This will maintain AP mode while also connecting to the station
-        connectToWiFi(userSSID, userPassword);
+        Serial.println("Attempting to connect to saved WiFi...");
+        isConnected = connectToWiFi(userSSID, userPassword);
+        
+        if (isConnected) {
+            Serial.println("Auto-connected to saved WiFi network");
+        } else {
+            Serial.println("Failed to auto-connect to saved WiFi");
+        }
     }
-    
-    // Ensure AP mode is active regardless of WiFi connection status
-    ensureAPMode();
     
     // Setup web server
     server->on("/", [this](){ this->handleRoot(); });
@@ -56,14 +59,28 @@ void WiFiManager::begin() {
     server->on("/guest", [this](){ this->handleGuest(); });
     server->on("/measurement", [this](){ this->handleMeasurement(); });
     server->on("/reconfigure_wifi", [this](){ this->handleReconfigWiFi(); });
+    server->on("/status", [this](){ this->handleStatus(); });
+    server->on("/force_ap", [this](){ this->handleForceAP(); });
     server->onNotFound([this](){ this->handleNotFound(); });
     server->begin();
     Serial.println("HTTP server started");
+    
+    // Print connection information
+    Serial.println("\n" + getConnectionInfo());
 }
 
 void WiFiManager::setupAPMode() {
     Serial.println("Setting up AP Mode");
-    WiFi.mode(WIFI_AP);
+    
+    // If WiFi is already connected, use dual mode (AP + STA)
+    if (WiFi.status() == WL_CONNECTED) {
+        WiFi.mode(WIFI_AP_STA);
+        Serial.println("Using dual mode (AP + Station)");
+    } else {
+        WiFi.mode(WIFI_AP);
+        Serial.println("Using AP mode only");
+    }
+    
     WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
     WiFi.softAP(ap_ssid, ap_password);
     
@@ -94,14 +111,8 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
     Serial.print("SSID: ");
     Serial.println(ssid);
     
-    // Set WiFi mode to both AP and STA to maintain both connections
+    // Use dual mode to maintain AP while connecting to WiFi
     WiFi.mode(WIFI_AP_STA);
-    
-    // Ensure AP is still running with our configuration
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    WiFi.softAP(ap_ssid, ap_password);
-    
-    // Connect to the provided network
     WiFi.begin(ssid.c_str(), password.c_str());
     
     int attempts = 0;
@@ -114,9 +125,9 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("");
         Serial.println("WiFi connected");
-        Serial.print("Station IP address: ");
+        Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
-        Serial.print("AP IP address: ");
+        Serial.print("AP IP address still available: ");
         Serial.println(WiFi.softAPIP());
         
         if (updateConnectionStatusCallback) {
@@ -128,6 +139,11 @@ bool WiFiManager::connectToWiFi(String ssid, String password) {
     } else {
         Serial.println("");
         Serial.println("WiFi connection failed");
+        
+        // If connection failed, ensure AP mode is still active
+        if (!apModeActive) {
+            setupAPMode();
+        }
         
         if (updateConnectionStatusCallback) {
             updateConnectionStatusCallback(false, false, isLoggedIn);
@@ -216,19 +232,6 @@ void WiFiManager::saveWiFiCredentials(String ssid, String password, bool guestMo
     EEPROM.end();
 }
 
-// New method to ensure AP is always running
-void WiFiManager::ensureAPMode() {
-    if (!apModeActive || WiFi.getMode() == WIFI_STA) {
-        Serial.println("Ensuring AP mode is active alongside STA mode");
-        WiFi.mode(WIFI_AP_STA);
-        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-        WiFi.softAP(ap_ssid, ap_password);
-        apModeActive = true;
-        Serial.print("AP IP address: ");
-        Serial.println(WiFi.softAPIP());
-    }
-}
-
 void WiFiManager::checkWiFiConnection() {
     // Only check periodically
     if ((millis() - lastWifiCheck < wifiCheckInterval)) {
@@ -237,33 +240,52 @@ void WiFiManager::checkWiFiConnection() {
     
     lastWifiCheck = millis();
     
-    // Always ensure AP is running for device access
-    ensureAPMode();
-    
-    // If we were connected but lost connection
+    // Check if we lost WiFi connection
     if (isConnected && WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi connection lost!");
         isConnected = false;
         
+        // Try to reconnect with saved credentials
+        if (userSSID.length() > 0) {
+            Serial.println("Attempting to reconnect...");
+            WiFi.mode(WIFI_AP_STA);
+            WiFi.begin(userSSID.c_str(), userPassword.c_str());
+            
+            // Give it a few seconds to reconnect
+            int attempts = 0;
+            while (WiFi.status() != WL_CONNECTED && attempts < 10) {
+                delay(500);
+                Serial.print(".");
+                attempts++;
+            }
+            
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.println("\nReconnected to WiFi!");
+                isConnected = true;
+                
+                if (updateConnectionStatusCallback) {
+                    updateConnectionStatusCallback(true, isGuestMode, isLoggedIn);
+                }
+                return;
+            } else {
+                Serial.println("\nFailed to reconnect");
+            }
+        }
+        
+        // Ensure AP mode is still active for reconfiguration
+        if (!apModeActive) {
+            setupAPMode();
+        }
+        
         if (updateConnectionStatusCallback) {
             updateConnectionStatusCallback(false, isGuestMode, isLoggedIn);
         }
-        
-        // Try to reconnect if we have credentials
-        if (userSSID.length() > 0) {
-            Serial.println("Attempting to reconnect to WiFi");
-            WiFi.begin(userSSID.c_str(), userPassword.c_str());
-        }
-    } else if (!isConnected && WiFi.status() == WL_CONNECTED) {
-        // We've reconnected
-        isConnected = true;
-        Serial.println("WiFi reconnected");
-        Serial.print("IP address: ");
-        Serial.println(WiFi.localIP());
-        
-        if (updateConnectionStatusCallback) {
-            updateConnectionStatusCallback(true, isGuestMode, isLoggedIn);
-        }
+    }
+    
+    // Check if we need to restart AP mode (in case it was disabled)
+    if (!apModeActive && WiFi.getMode() != WIFI_AP_STA && WiFi.getMode() != WIFI_AP) {
+        Serial.println("AP mode not active, restarting...");
+        setupAPMode();
     }
 }
 
@@ -299,19 +321,23 @@ void WiFiManager::handleRoot() {
     
     // Show WiFi status
     if (isConnected) {
-        html += "<p class='status connected'>WiFi Connected to: " + userSSID + "</p>"
-                "<p>Network IP Address: " + WiFi.localIP().toString() + "</p>";
+        html += "<p class='status connected'>WiFi Connected to: " + userSSID + "</p>";
+        html += "<p class='status'>Station IP: " + WiFi.localIP().toString() + "</p>";
     } else {
         html += "<p class='status disconnected'>WiFi Not Connected</p>";
     }
     
-    html += "<p>You can always access this device at: " + WiFi.softAPIP().toString() + "</p>"
-            "<p>Configure your WiFi connection:</p>"
+    html += "<p class='status'>Hotspot IP: " + WiFi.softAPIP().toString() + "</p>";
+    html += "<p style='font-size: 12px; color: #666;'>Access this device from both WiFi network and hotspot</p>";
+    
+    html += "<p>Configure your WiFi connection:</p>"
             "<form action='/wifi' method='get'><button type='submit'>Setup WiFi</button></form>";
     
     if (isConnected) {
         html += "<form action='/mode' method='get'><button type='submit'>Continue to Mode Selection</button></form>";
     }
+    
+    html += "<form action='/status' method='get'><button type='submit' class='guest-btn'>Connection Status</button></form>";
     
     html += "</div></body></html>";
     server->send(200, "text/html", html);
@@ -380,19 +406,23 @@ void WiFiManager::handleConnect() {
         if (isConnected) {
             html += "<p class='success'>WiFi connected successfully!</p>"
                     "<p>Connected to: " + ssid + "</p>"
-                    "<p>Network IP Address: " + WiFi.localIP().toString() + "</p>"
-                    "<p>You can also always access this device at: " + WiFi.softAPIP().toString() + "</p>"
+                    "<p>IP Address: " + WiFi.localIP().toString() + "</p>"
+                    "<p>You can also access this device at: " + WiFi.softAPIP().toString() + " (Hotspot)</p>"
                     "<meta http-equiv='refresh' content='3;url=/mode'>"
                     "<p>You will be redirected to mode selection in 3 seconds...</p>";
             
-            // The AP mode is already set in connectToWiFi
+            // Maintain dual mode (AP + STA) so hotspot remains available
+            // This is already set in connectToWiFi function
         } else {
             html += "<p class='error'>Failed to connect to WiFi!</p>"
                     "<p>Please check your credentials and try again.</p>"
                     "<meta http-equiv='refresh' content='3;url=/wifi'>"
                     "<p>You will be redirected to WiFi setup in 3 seconds...</p>";
             
-            apModeActive = true;
+            // Ensure AP mode is active for reconfiguration
+            if (!apModeActive) {
+                setupAPMode();
+            }
         }
         
         html += "</div></body></html>";
@@ -682,6 +712,84 @@ void WiFiManager::handleReconfigWiFi() {
     }
 }
 
+void WiFiManager::handleStatus() {
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<title>HealthSense Connection Status</title>"
+                  "<style>"
+                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                  ".container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                  "h1 { color: #333; }"
+                  ".status-info { text-align: left; background: #f9f9f9; padding: 15px; border-radius: 5px; margin: 15px 0; font-family: monospace; }"
+                  "button { background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 5px; }"
+                  "button:hover { background: #45a049; }"
+                  ".back-btn { background: #2196F3; }"
+                  ".back-btn:hover { background: #0b7dda; }"
+                  ".force-btn { background: #f44336; }"
+                  ".force-btn:hover { background: #d32f2f; }"
+                  ".refresh-btn { background: #FF9800; }"
+                  ".refresh-btn:hover { background: #e68900; }"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container'>"
+                  "<h1>Connection Status</h1>"
+                  "<div class='status-info'>";
+    
+    // Add detailed connection information
+    html += getConnectionInfo();
+    
+    html += "</div>"
+            "<p><strong>How to Connect:</strong></p>"
+            "<ul style='text-align: left; margin: 20px 0;'>";
+    
+    if (isConnected) {
+        html += "<li>Via WiFi Network: Connect to '" + userSSID + "' and access " + WiFi.localIP().toString() + "</li>";
+    }
+    
+    html += "<li>Via Hotspot: Connect to '" + String(ap_ssid) + "' and access " + WiFi.softAPIP().toString() + "</li>"
+            "</ul>"
+            "<div style='margin-top: 30px;'>"
+            "<form action='/' method='get' style='display: inline;'><button type='submit' class='back-btn'>Back to Home</button></form>"
+            "<button onclick='location.reload()' class='refresh-btn'>Refresh Status</button>";
+    
+    if (isConnected) {
+        html += "<form action='/force_ap' method='get' style='display: inline;'><button type='submit' class='force-btn'>Force Hotspot Only</button></form>";
+    }
+    
+    html += "</div>"
+            "</div>"
+            "</body></html>";
+    
+    server->send(200, "text/html", html);
+}
+
+void WiFiManager::handleForceAP() {
+    forceAPMode();
+    
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<title>HealthSense Force AP Mode</title>"
+                  "<style>"
+                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                  "h1 { color: #333; }"
+                  ".success { color: #4CAF50; }"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container'>"
+                  "<h1>AP Mode Forced</h1>"
+                  "<p class='success'>Device is now in Access Point mode only.</p>"
+                  "<p>WiFi connection has been disconnected.</p>"
+                  "<meta http-equiv='refresh' content='3;url=/'>"
+                  "<p>You will be redirected to home in 3 seconds...</p>"
+                  "</div>"
+                  "</body></html>";
+    
+    server->send(200, "text/html", html);
+}
+
 void WiFiManager::handleNotFound() {
     server->sendHeader("Location", "http://" + apIP.toString(), true);
     server->send(302, "text/plain", "");
@@ -881,5 +989,70 @@ void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
                 sendDataCallback(userUID, heartRate, spo2);
             }
         }
+    }
+}
+
+String WiFiManager::getConnectionInfo() const {
+    String info = "Connection Status:\n";
+    info += "- WiFi Mode: ";
+    
+    switch (WiFi.getMode()) {
+        case WIFI_AP:
+            info += "Access Point Only\n";
+            break;
+        case WIFI_STA:
+            info += "Station Only\n";
+            break;
+        case WIFI_AP_STA:
+            info += "Dual Mode (AP + Station)\n";
+            break;
+        default:
+            info += "Off\n";
+            break;
+    }
+    
+    if (isConnected) {
+        info += "- Connected to: " + userSSID + "\n";
+        info += "- Station IP: " + WiFi.localIP().toString() + "\n";
+    } else {
+        info += "- Not connected to WiFi\n";
+    }
+    
+    if (apModeActive) {
+        info += "- Hotspot Active: " + String(ap_ssid) + "\n";
+        info += "- Hotspot IP: " + WiFi.softAPIP().toString() + "\n";
+    } else {
+        info += "- Hotspot: Inactive\n";
+    }
+    
+    return info;
+}
+
+void WiFiManager::forceAPMode() {
+    Serial.println("Forcing AP mode...");
+    WiFi.disconnect();
+    isConnected = false;
+    setupAPMode();
+    
+    if (updateConnectionStatusCallback) {
+        updateConnectionStatusCallback(false, isGuestMode, isLoggedIn);
+    }
+}
+
+void WiFiManager::restartWiFi() {
+    Serial.println("Restarting WiFi...");
+    WiFi.disconnect();
+    delay(1000);
+    
+    isConnected = false;
+    
+    // Try to reconnect with saved credentials
+    if (userSSID.length() > 0) {
+        isConnected = connectToWiFi(userSSID, userPassword);
+    }
+    
+    // Ensure AP mode is active
+    if (!apModeActive) {
+        setupAPMode();
     }
 }

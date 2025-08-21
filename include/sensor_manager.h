@@ -3,8 +3,6 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-// Include common types for shared enums and constants
-#include "common_types.h"
 // Include our fix for ESP32 and MAX30105.h compatibility
 #include "esp32_max30105_fix.h"
 // Wire.h is included before MAX30105.h to avoid buffer length conflicts
@@ -46,15 +44,8 @@ private:
     int sda_pin;           // SDA pin for I2C
     int scl_pin;           // SCL pin for I2C
     
-    // State for staged measurement
-    MeasurementPhase phase;
-    unsigned long fingerPlacedTime;
-    unsigned long lastValidTime;
-    int consecutiveValid;
-    bool lastFingerDetected;
-    
     // Callbacks
-    void (*updateReadingsCallback)(int32_t hr, bool validHR, int32_t spo2, bool validSPO2, MeasurementPhase phase);
+    void (*updateReadingsCallback)(int32_t hr, bool validHR, int32_t spo2, bool validSPO2);
     void (*updateFingerStatusCallback)(bool fingerDetected);
 
 public:
@@ -75,11 +66,9 @@ public:
     bool isSPO2Valid() const { return validSPO2; }
     bool isReady() const { return sensorReady; }
     bool isFingerDetected() const;
-    MeasurementPhase getMeasurementPhase() const { return phase; }
-    bool isReliableMeasurement() const { return phase == PHASE_RELIABLE; }
     
     // Set callbacks
-    void setUpdateReadingsCallback(void (*callback)(int32_t hr, bool validHR, int32_t spo2, bool validSPO2, MeasurementPhase phase));
+    void setUpdateReadingsCallback(void (*callback)(int32_t hr, bool validHR, int32_t spo2, bool validSPO2));
     void setUpdateFingerStatusCallback(void (*callback)(bool fingerDetected));
     
     void setReady(bool ready) { sensorReady = ready; }

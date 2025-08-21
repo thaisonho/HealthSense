@@ -3,9 +3,6 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
-// Include common types
-#include "common_types.h"
-
 // Include managers
 #include "wifi_manager.h"
 #include "display_manager.h"
@@ -60,33 +57,20 @@ void setup() {
   wifiManager.setUpdateConnectionStatusCallback(updateConnectionStatus);
   wifiManager.setSendDataCallback(sendSensorData);
   
-  // Set up callbacks for sensor manager with phase information
-  sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2, MeasurementPhase phase) {
-    // Always update the display with current readings, validity flags and measurement phase
-    display.updateSensorReadings(hr, validHR, spo2, validSPO2, phase);
+  // Set up callbacks for sensor manager
+  sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2) {
+    // Always update the display with current readings and validity flags
+    display.updateSensorReadings(hr, validHR, spo2, validSPO2);
     
-    // Only send valid readings to the server in RELIABLE phase
-    if (validHR && validSPO2 && phase == PHASE_RELIABLE) {
-      // Add additional validation checks using physiological constants
+    // Only send valid readings to the server
+    if (validHR && validSPO2) {
+      // Add additional validation checks using physiological constants from sensor_manager.cpp
       if (hr >= MIN_VALID_HR && hr <= MAX_VALID_HR && 
           spo2 >= MIN_VALID_SPO2 && spo2 <= MAX_VALID_SPO2) {
-        Serial.println(F("Reliable readings detected, sending to server"));
+        Serial.println(F("Valid readings detected, sending to server"));
         wifiManager.sendSensorData(hr, spo2);
       } else {
         Serial.println(F("Readings outside physiological range, not sending"));
-      }
-    } else if (phase != PHASE_RELIABLE) {
-      // Log the current measurement phase
-      Serial.print(F("In measurement phase: "));
-      switch (phase) {
-        case PHASE_INIT:
-          Serial.println(F("INITIALIZATION (warming up)"));
-          break;
-        case PHASE_STABILIZE:
-          Serial.println(F("STABILIZATION (acquiring stable signal)"));
-          break;
-        default:
-          Serial.println(F("UNKNOWN"));
       }
     } else {
       Serial.println(F("Invalid readings, not sending to server"));
@@ -144,7 +128,7 @@ void loop() {
         static bool firstReading = true;
         
         if (firstReading) {
-          display.showMeasuringStatus(PHASE_INIT);
+          display.showMeasuringStatus();
           sensorManager.readSensor();
           firstReading = false;
         } else {
