@@ -220,6 +220,10 @@ void DisplayManager::showAIAnalysisLoading() {
 }
 
 void DisplayManager::displayAIHealthSummary(const String& summary) {
+    Serial.println(F("📱 Displaying AI Health Summary"));
+    Serial.print(F("📏 Summary length: "));
+    Serial.println(summary.length());
+    
     // Clear the entire screen for full-screen display
     tft->fillScreen(ST7735_BLACK);
     
@@ -241,16 +245,31 @@ void DisplayManager::displayAIHealthSummary(const String& summary) {
     // Display the summary text with word wrapping
     tft->setTextColor(ST7735_GREEN);
     
+    // Check if it's an error message
+    bool isError = summary.startsWith("Error:");
+    if (isError) {
+        tft->setTextColor(ST7735_RED);
+    }
+    
+    // Truncate very long summaries to prevent display issues
+    String displayText = summary;
+    if (displayText.length() > 800) { // Set a reasonable limit
+        displayText = displayText.substring(0, 800) + "...";
+        Serial.println(F("⚠️ Summary truncated for display"));
+    }
+    
     // Word wrap and display the summary
     int16_t xPos = 5;
     int16_t yPos = 25;
     String currentWord = "";
+    int lineCount = 0;
+    const int maxLines = 11; // Maximum number of lines that fit on the screen
     
-    for (uint16_t i = 0; i < summary.length(); i++) {
-        char c = summary.charAt(i);
+    for (uint16_t i = 0; i < displayText.length(); i++) {
+        char c = displayText.charAt(i);
         
-        if (c == ' ' || c == '\n' || i == summary.length() - 1) {
-            if (i == summary.length() - 1 && c != ' ' && c != '\n') {
+        if (c == ' ' || c == '\n' || i == displayText.length() - 1) {
+            if (i == displayText.length() - 1 && c != ' ' && c != '\n') {
                 currentWord += c;
             }
             
@@ -259,6 +278,13 @@ void DisplayManager::displayAIHealthSummary(const String& summary) {
             if (xPos + wordWidth > 155) {
                 xPos = 5;
                 yPos += 10; // Line height
+                lineCount++;
+                
+                // Check if we've reached the maximum number of lines
+                if (lineCount >= maxLines) {
+                    tft->print("...");
+                    break;
+                }
             }
             
             tft->setCursor(xPos, yPos);
@@ -270,6 +296,14 @@ void DisplayManager::displayAIHealthSummary(const String& summary) {
             if (c == '\n') {
                 xPos = 5;
                 yPos += 10;
+                lineCount++;
+                
+                // Check if we've reached the maximum number of lines
+                if (lineCount >= maxLines) {
+                    tft->setCursor(xPos, yPos);
+                    tft->print("...");
+                    break;
+                }
             }
         } else {
             currentWord += c;
@@ -280,4 +314,11 @@ void DisplayManager::displayAIHealthSummary(const String& summary) {
     tft->setTextColor(ST7735_YELLOW);
     tft->setCursor(5, 140);
     tft->print("Use web interface to return");
+    
+    // Debug info
+    Serial.println(F("✅ AI Health Summary displayed"));
+    
+    // Track memory usage for debugging
+    Serial.print(F("💾 Free memory after display: "));
+    Serial.println(ESP.getFreeHeap());
 }

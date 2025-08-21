@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
+#include "esp32_max30105_fix.h" // Include this before Adafruit_GFX to fix I2C_BUFFER_LENGTH issue
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
@@ -25,15 +27,7 @@ DisplayManager display(&tft, eva, eva_width, eva_height);
 WiFiManager wifiManager("HealthSense", "123123123", "https://iot.newnol.io.vn");
 SensorManager sensorManager(100); // buffer size 100
 
-// App state
-enum AppState {
-  STATE_SETUP,
-  STATE_CONNECTING,
-  STATE_LOGIN,
-  STATE_MEASURING,
-  STATE_AI_ANALYSIS
-};
-
+// Global app state (using the common AppState enum from common_types.h)
 AppState currentState = STATE_SETUP;
 bool isInitialized = false;
 String aiSummaryResult = "";
@@ -65,6 +59,9 @@ void setup() {
       sensorManager.startMeasurement();
     }
   });
+  
+  // Set up AI Analysis callback
+  wifiManager.setHandleAIAnalysisCallback(handleAIAnalysisRequest);
   
   // Set up callbacks for sensor manager
   sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2) {

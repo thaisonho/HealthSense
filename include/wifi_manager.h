@@ -37,6 +37,7 @@ private:
     void (*updateConnectionStatusCallback)(bool connected, bool guestMode, bool loggedIn);
     void (*sendDataCallback)(String uid, int32_t heartRate, int32_t spo2);
     void (*startNewMeasurementCallback)();
+    void (*handleAIAnalysisCallback)(String summary);
     
     // Web handlers
     void handleRoot();
@@ -78,6 +79,7 @@ public:
     void setSetupUICallback(void (*callback)());
     void setInitializeSensorCallback(void (*callback)());
     void setUpdateConnectionStatusCallback(void (*callback)(bool connected, bool guestMode, bool loggedIn));
+    void setHandleAIAnalysisCallback(void (*callback)(String summary));
     void setSendDataCallback(void (*callback)(String uid, int32_t heartRate, int32_t spo2));
     void setStartNewMeasurementCallback(void (*callback)());
     

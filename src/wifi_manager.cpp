@@ -24,7 +24,8 @@ WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password, const cha
     initializeSensorCallback(nullptr),
     updateConnectionStatusCallback(nullptr),
     sendDataCallback(nullptr),
-    startNewMeasurementCallback(nullptr)
+    startNewMeasurementCallback(nullptr),
+    handleAIAnalysisCallback(nullptr)
 {
     apIP = IPAddress(192, 168, 4, 1);
     server = new WebServer(80);
@@ -864,6 +865,10 @@ void WiFiManager::setStartNewMeasurementCallback(void (*callback)()) {
     startNewMeasurementCallback = callback;
 }
 
+void WiFiManager::setHandleAIAnalysisCallback(void (*callback)(String summary)) {
+    handleAIAnalysisCallback = callback;
+}
+
 void WiFiManager::saveUserCredentials(String email, String uid) {
     EEPROM.begin(EEPROM_SIZE);
     
@@ -1212,6 +1217,11 @@ bool WiFiManager::getAIHealthSummary(String& summary) {
         http.addHeader("X-User-Id", userUID);
     }
     
+    // Free some memory before making the request
+    ESP.getFreeHeap(); // This call helps clear internal heap fragmentation
+    Serial.print(F("📈 Free memory before request: "));
+    Serial.println(ESP.getFreeHeap());
+    
     // Send GET request to get AI summary
     int httpCode = http.GET();
     Serial.print(F("📥 AI Summary API response code: "));
@@ -1221,19 +1231,55 @@ bool WiFiManager::getAIHealthSummary(String& summary) {
     if (httpCode == HTTP_CODE_OK) {
         String response = http.getString();
         Serial.println(F("✅ AI summary received successfully"));
+        Serial.print(F("📊 Response length: "));
+        Serial.println(response.length());
         
-        // Parse JSON response
-        DynamicJsonDocument doc(2048); // Larger buffer for AI summary
+        // Log part of the response for debugging
+        Serial.print(F("🔍 Response preview: "));
+        if (response.length() > 100) {
+            Serial.println(response.substring(0, 100) + "...");
+        } else {
+            Serial.println(response);
+        }
+        
+        // Parse JSON response with increased buffer size
+        DynamicJsonDocument doc(4096); // Increased buffer for AI summary (4KB)
         DeserializationError error = deserializeJson(doc, response);
         
         if (!error) {
             summary = doc["summary"].as<String>();
             success = true;
+            Serial.println(F("✅ JSON parsed successfully"));
         } else {
             Serial.print(F("❌ JSON parsing error: "));
             Serial.println(error.c_str());
-            summary = "Error: Could not parse AI summary";
-            success = false;
+            Serial.println(F("💡 Try increasing DynamicJsonDocument size if NoMemory error persists"));
+            
+            // In case of memory error, try a crude extraction as fallback
+            if (error == DeserializationError::NoMemory) {
+                Serial.println(F("🔄 Attempting fallback parsing method"));
+                
+                // Simple string extraction (looking for "summary": "text")
+                int summaryStart = response.indexOf("\"summary\":");
+                if (summaryStart > 0) {
+                    summaryStart = response.indexOf("\"", summaryStart + 10) + 1;
+                    int summaryEnd = response.indexOf("\"", summaryStart);
+                    if (summaryStart > 0 && summaryEnd > summaryStart) {
+                        summary = response.substring(summaryStart, summaryEnd);
+                        Serial.println(F("✅ Fallback parsing succeeded"));
+                        success = true;
+                    } else {
+                        summary = "Error: Could not parse AI summary (fallback failed)";
+                        success = false;
+                    }
+                } else {
+                    summary = "Error: Could not parse AI summary (no summary field)";
+                    success = false;
+                }
+            } else {
+                summary = "Error: Could not parse AI summary";
+                success = false;
+            }
         }
     } else {
         Serial.print(F("❌ Failed to get AI summary: "));
@@ -1244,6 +1290,11 @@ bool WiFiManager::getAIHealthSummary(String& summary) {
     
     http.end();
     Serial.println(F("🔚 HTTP client closed"));
+    
+    // Check memory after request
+    Serial.print(F("📉 Free memory after request: "));
+    Serial.println(ESP.getFreeHeap());
+    
     return success;
 }
 
@@ -1371,9 +1422,10 @@ void WiFiManager::handleAIAnalysis() {
     
     server->send(200, "text/html", html);
     
-    // Call the main.cpp handleAIAnalysisRequest function to display on device
-    extern void handleAIAnalysisRequest(String);
-    handleAIAnalysisRequest(aiSummary);
+    // Display the AI health summary on the device using the callback
+    if (handleAIAnalysisCallback) {
+        handleAIAnalysisCallback(aiSummary);
+    }
 }
 
 void WiFiManager::handleReturnToMeasurement() {
@@ -1385,9 +1437,7 @@ void WiFiManager::handleReturnToMeasurement() {
         initializeSensorCallback();
     }
     
-    // Update app state to measuring
-    extern AppState currentState;
-    currentState = STATE_MEASURING;
+    // The AppState handling is now done in initializeSensorCallback()
     
     // Start new measurement if callback exists
     if (startNewMeasurementCallback) {
