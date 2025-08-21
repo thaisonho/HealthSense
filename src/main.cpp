@@ -134,6 +134,21 @@ void loop() {
   // Always process WiFi and web server
   wifiManager.loop();
   
+  // MQTT functionality would be here if implemented
+  // Currently MQTT functionality is not implemented
+  if (WiFi.status() == WL_CONNECTED) {
+    // MQTT integration will be added in future updates
+    // For now we just log connection status
+    static bool wifiConnectedMsgSent = false;
+    if (!wifiConnectedMsgSent) {
+      Serial.println(F("📶 WiFi connected, but MQTT not yet implemented"));
+      wifiConnectedMsgSent = true;
+    }
+  } else {
+    // Reset connection message flag when WiFi disconnects
+    static bool wifiConnectedMsgSent = false;
+  }
+  
   // State machine for app behavior
   switch (currentState) {
     case STATE_SETUP:
@@ -222,16 +237,24 @@ void updateConnectionStatus(bool connected, bool guestMode, bool loggedIn) {
     // User mode with successful login
     display.showLoggedIn();
     currentState = STATE_MEASURING;
+    
+    // MQTT will be started in the main loop
+    Serial.println(F("🦟 Connection successful - User logged in"));
   } else if (guestMode) {
     // Guest mode
     display.showGuestMode();
     currentState = STATE_MEASURING;
+    
+    // MQTT will be started in the main loop
+    Serial.println(F("🦟 Connection successful - Guest mode"));
   } else if (connected && !loggedIn) {
     // Connected but not logged in yet
+    display.showConnectionSuccess(WiFi.localIP().toString());
     currentState = STATE_LOGIN;
     sensorManager.setReady(false);
   } else {
-    // Not connected
+    // Not connected - show specific error code from WiFiManager
+    display.showConnectionFailure(wifiManager.getLastWifiErrorCode());
     currentState = STATE_SETUP;
     sensorManager.setReady(false);
   }

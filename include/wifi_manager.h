@@ -8,6 +8,7 @@
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <esp_wifi.h>
 #include "common_types.h"
 
 
@@ -30,6 +31,10 @@ private:
     bool isMeasuring;
     unsigned long lastWifiCheck;
     const unsigned long wifiCheckInterval;
+    int lastWifiErrorCode; // Store the last WiFi error code
+    
+    // CSS for web interface
+    String commonCSS;
     
     // Function pointers for callbacks
     void (*setupUICallback)();
@@ -55,6 +60,7 @@ private:
     void handleNotFound();
     void handleAIAnalysis();
     void handleReturnToMeasurement();
+    String getCommonCSS();
     
     // API communication
     bool authenticateUser(String email, String password);
@@ -94,6 +100,7 @@ public:
     IPAddress getAPIP() const { return apIP; }
     IPAddress getStationIP() const { return WiFi.localIP(); }
     String getConnectionInfo() const;
+    int getLastWifiErrorCode() const { return lastWifiErrorCode; }
     
     // Control measurement state
     void startMeasurement() { isMeasuring = true; }

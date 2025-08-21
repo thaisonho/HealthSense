@@ -56,11 +56,39 @@ void DisplayManager::showConnectionSuccess(String ipAddress) {
     tft->println(ipAddress);
 }
 
-void DisplayManager::showConnectionFailure() {
-    tft->fillRect(0, 130, 160, 30, ST7735_BLACK);
+void DisplayManager::showConnectionFailure(int errorCode) {
+    tft->fillRect(0, 130, 160, 50, ST7735_BLACK);
     tft->setCursor(5, 130);
     tft->setTextColor(ST7735_RED);
     tft->println("WiFi Connection Failed");
+    
+    tft->setCursor(5, 140);
+    tft->setTextColor(ST7735_YELLOW);
+    
+    // Display specific error message based on WiFi status code
+    switch(errorCode) {
+        case WL_NO_SSID_AVAIL:
+            tft->println("SSID not found");
+            break;
+        case WL_CONNECT_FAILED:
+            tft->println("Wrong password");
+            break;
+        case WL_IDLE_STATUS:
+            tft->println("Idle - still trying");
+            break;
+        case WL_CONNECTION_LOST:
+            tft->println("Connection lost");
+            break;
+        default:
+            tft->print("Error code: ");
+            tft->println(errorCode);
+            break;
+    }
+    
+    // Show helpful advice
+    tft->setCursor(5, 150);
+    tft->setTextColor(ST7735_WHITE);
+    tft->println("Check network settings");
 }
 
 void DisplayManager::showGuestMode() {
