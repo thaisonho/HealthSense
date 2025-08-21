@@ -8,6 +8,8 @@
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include "common_types.h"
+
 
 class WiFiManager {
 private:
@@ -34,6 +36,7 @@ private:
     void (*initializeSensorCallback)();
     void (*updateConnectionStatusCallback)(bool connected, bool guestMode, bool loggedIn);
     void (*sendDataCallback)(String uid, int32_t heartRate, int32_t spo2);
+    void (*startNewMeasurementCallback)();
     
     // Web handlers
     void handleRoot();
@@ -44,6 +47,7 @@ private:
     void handleLoginSubmit();
     void handleGuest();
     void handleMeasurement();
+    void handleContinueMeasuring();
     void handleReconfigWiFi();
     void handleStatus();
     void handleForceAP();
@@ -64,12 +68,14 @@ public:
     void saveWiFiCredentials(String ssid, String password, bool guestMode);
     void saveUserCredentials(String email, String uid);
     void sendSensorData(int32_t heartRate, int32_t spo2);
+    bool sendDeviceData(int32_t heartRate, int32_t spo2, String userId = "");
     
     // Setters for callbacks
     void setSetupUICallback(void (*callback)());
     void setInitializeSensorCallback(void (*callback)());
     void setUpdateConnectionStatusCallback(void (*callback)(bool connected, bool guestMode, bool loggedIn));
     void setSendDataCallback(void (*callback)(String uid, int32_t heartRate, int32_t spo2));
+    void setStartNewMeasurementCallback(void (*callback)());
     
     // Getters
     bool isWiFiConnected() const { return isConnected; }

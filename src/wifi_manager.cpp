@@ -23,7 +23,8 @@ WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password, const cha
     setupUICallback(nullptr),
     initializeSensorCallback(nullptr),
     updateConnectionStatusCallback(nullptr),
-    sendDataCallback(nullptr)
+    sendDataCallback(nullptr),
+    startNewMeasurementCallback(nullptr)
 {
     apIP = IPAddress(192, 168, 4, 1);
     server = new WebServer(80);
@@ -58,6 +59,7 @@ void WiFiManager::begin() {
     server->on("/login_submit", HTTP_POST, [this](){ this->handleLoginSubmit(); });
     server->on("/guest", [this](){ this->handleGuest(); });
     server->on("/measurement", [this](){ this->handleMeasurement(); });
+    server->on("/continue_measuring", [this](){ this->handleContinueMeasuring(); });
     server->on("/reconfigure_wifi", [this](){ this->handleReconfigWiFi(); });
     server->on("/status", [this](){ this->handleStatus(); });
     server->on("/force_ap", [this](){ this->handleForceAP(); });
@@ -653,29 +655,30 @@ void WiFiManager::handleMeasurement() {
                   ".reconfigure-btn { background: #f44336; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin-top: 30px; width: 100%; }"
                   ".reconfigure-btn:hover { background: #d32f2f; }"
                   "</style>"
-                  "<script>"
-                  "function refreshReadings() {"
-                  "  // In a real implementation, this would fetch from an endpoint"
-                  "  // For this demo, we'll just reload the page every 10 seconds"
-                  "  setTimeout(function() { location.reload(); }, 10000);"
-                  "}"
-                  "window.onload = function() { refreshReadings(); }"
-                  "</script>"
                   "</head>"
                   "<body>"
                   "<div class='container'>"
                   "<h1>HealthSense Monitor</h1>";
     
     if (isLoggedIn) {
-        html += "<p class='user-status'>User Mode - Data is being saved</p>";
+        html += "<p class='user-status'>User Mode - Data is being saved to server</p>";
     } else {
         html += "<p class='guest-status'>Guest Mode - Data is not being saved</p>"
                 "<p>Register at: <a href='https://iot.newnol.io.vn' target='_blank'>HealthSense Portal</a></p>";
     }
     
-    html += "<p class='status'>Place your finger on the sensor to measure</p>"
+    html += "<p class='status'>Place your finger on the sensor to start measuring</p>"
+            "<p class='status'>Need 5 valid readings for final result</p>"
             "<div class='reading hr'>Heart Rate: <span id='hr'>--</span> BPM</div>"
-            "<div class='reading spo2'>SpO2: <span id='spo2'>--</span> %</div>";
+            "<div class='reading spo2'>SpO2: <span id='spo2'>--</span> %</div>"
+            "<div class='reading'>Progress: <span id='progress'>0/5</span> readings</div>";
+    
+    // Add continue measuring button
+    html += "<div style='margin: 20px 0;'>"
+            "<form action='/continue_measuring' method='get' style='display: inline;'>"
+            "<button type='submit' style='background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 5px;'>Start New Measurement</button>"
+            "</form>"
+            "</div>";
     
     // Show different buttons based on whether this is guest mode or user mode
     if (isGuestMode) {
@@ -696,6 +699,38 @@ void WiFiManager::handleMeasurement() {
     
     // Make sure we're measuring
     isMeasuring = true;
+}
+
+void WiFiManager::handleContinueMeasuring() {
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<title>HealthSense New Measurement</title>"
+                  "<style>"
+                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
+                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                  "h1 { color: #333; }"
+                  ".success { color: #4CAF50; }"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container'>"
+                  "<h1>New Measurement Started</h1>"
+                  "<p class='success'>Starting new measurement cycle...</p>"
+                  "<p>Place your finger on the sensor and keep it steady.</p>"
+                  "<p>The system will collect 5 valid readings and calculate the average.</p>"
+                  "<meta http-equiv='refresh' content='3;url=/measurement'>"
+                  "<p>You will be redirected to measurement page in 3 seconds...</p>"
+                  "</div>"
+                  "</body></html>";
+    
+    server->send(200, "text/html", html);
+    
+    // Trigger start of new measurement via callback
+    Serial.println("Web interface requested new measurement cycle");
+    
+    if (startNewMeasurementCallback) {
+        startNewMeasurementCallback();
+    }
 }
 
 void WiFiManager::handleReconfigWiFi() {
@@ -818,6 +853,10 @@ void WiFiManager::setUpdateConnectionStatusCallback(void (*callback)(bool connec
 
 void WiFiManager::setSendDataCallback(void (*callback)(String uid, int32_t heartRate, int32_t spo2)) {
     sendDataCallback = callback;
+}
+
+void WiFiManager::setStartNewMeasurementCallback(void (*callback)()) {
+    startNewMeasurementCallback = callback;
 }
 
 void WiFiManager::saveUserCredentials(String email, String uid) {
@@ -969,29 +1008,162 @@ bool WiFiManager::sendMeasurementData(String uid, int32_t heartRate, int32_t spo
     return (httpCode == HTTP_CODE_OK);
 }
 
-void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
-    if (isMeasuring) {
-        // If in guest mode, no need to send to server
-        if (isGuestMode) {
-            // Just call the callback if it exists
-            if (sendDataCallback) {
-                sendDataCallback("guest", heartRate, spo2);
-            }
-            return;
-        }
-        
-        // If logged in, send to server
-        if (isLoggedIn && userUID.length() > 0) {
-            sendMeasurementData(userUID, heartRate, spo2);
-            
-            // Call callback if it exists
-            if (sendDataCallback) {
-                sendDataCallback(userUID, heartRate, spo2);
-            }
-        }
+
+bool WiFiManager::sendDeviceData(int32_t heartRate, int32_t spo2, String userId) {
+    if (!isConnected) {
+        Serial.println(F("❌ Not connected to WiFi, cannot send data"));
+        return false;
     }
+    
+    Serial.println(F("🌐 Preparing to send device data..."));
+    
+    HTTPClient http;
+    String url = serverURL;
+    if (!url.endsWith("/")) {
+        url += "/";
+    }
+    url += "api/records";
+    
+    Serial.print(F("📍 URL: "));
+    Serial.println(url);
+    
+    // Use a try-catch-like approach for safer execution
+    bool initSuccess = false;
+    try {
+        initSuccess = http.begin(url);
+    } catch (...) {
+        Serial.println(F("❌ Failed to initialize HTTP client"));
+        return false;
+    }
+    
+    if (!initSuccess) {
+        Serial.println(F("❌ HTTP client initialization failed"));
+        return false;
+    }
+    
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-Device-Id", DEVICE_ID);
+    http.addHeader("X-Device-Secret", DEVICE_SECRET);
+    
+    // Add user ID header if provided
+    if (userId.length() > 0) {
+        http.addHeader("X-User-Id", userId);
+        Serial.print(F("👤 User ID: "));
+        Serial.println(userId);
+    }
+    
+    // Create JSON payload with correct field names
+    DynamicJsonDocument doc(200);
+    doc["heart_rate"] = heartRate;
+    doc["spo2"] = spo2;
+    String payload;
+    serializeJson(doc, payload);
+    
+    Serial.print(F("📦 Payload: "));
+    Serial.println(payload);
+    
+    // Send POST request with timeout
+    int httpCode = -1;
+    try {
+        http.setTimeout(10000); // 10 second timeout
+        httpCode = http.POST(payload);
+    } catch (...) {
+        Serial.println(F("❌ HTTP POST request failed (exception)"));
+        http.end();
+        return false;
+    }
+    
+    Serial.print(F("📡 Response code: "));
+    Serial.println(httpCode);
+    
+    bool success = false;
+    if (httpCode == HTTP_CODE_OK) {
+        String response = http.getString();
+        Serial.print(F("✅ Success! Response: "));
+        Serial.println(response);
+        success = true;
+    } else if (httpCode > 0) {
+        String response = http.getString();
+        Serial.print(F("❌ HTTP error "));
+        Serial.print(httpCode);
+        Serial.print(F(". Response: "));
+        Serial.println(response);
+    } else {
+        Serial.print(F("❌ Connection error: "));
+        Serial.println(http.errorToString(httpCode));
+    }
+    
+    http.end();
+    Serial.println(F("🔚 HTTP client closed"));
+    return success;
 }
 
+
+void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
+    Serial.println(F("🔄 sendSensorData() called"));
+    Serial.print(F("Parameters - HR: "));
+    Serial.print(heartRate);
+    Serial.print(F(", SpO2: "));
+    Serial.println(spo2);
+    Serial.print(F("State - isMeasuring: "));
+    Serial.print(isMeasuring);
+    Serial.print(F(", isLoggedIn: "));
+    Serial.print(isLoggedIn);
+    Serial.print(F(", isGuestMode: "));
+    Serial.print(isGuestMode);
+    Serial.print(F(", userUID length: "));
+    Serial.println(userUID.length());
+    
+    // Only send data if measuring and user is logged in (not guest mode)
+    if (isMeasuring && isLoggedIn && !isGuestMode && userUID.length() > 0) {
+        Serial.println(F("📤 Sending measurement data to server (User mode)"));
+        bool success = sendDeviceData(heartRate, spo2, userUID);
+        if (success) {
+            Serial.println(F("✅ Data sent successfully"));
+        } else {
+            Serial.println(F("❌ Failed to send data"));
+        }
+        
+        // Call callback if it exists
+        if (sendDataCallback) {
+            Serial.println(F("🔔 Calling sendDataCallback for user mode"));
+            sendDataCallback(userUID, heartRate, spo2);
+        }
+    } else if (isMeasuring && isGuestMode) {
+        Serial.println(F("👤 Guest mode - not sending data to server"));
+        
+        // Call callback for guest mode (for local display only)
+        if (sendDataCallback) {
+            Serial.println(F("🔔 Calling sendDataCallback for guest mode"));
+            sendDataCallback("guest", heartRate, spo2);
+        }
+    } else if (isMeasuring && !isLoggedIn) {
+        Serial.println(F("🔒 User not logged in - not sending data to server"));
+        
+        // Call callback for anonymous mode (for local display only)
+        if (sendDataCallback) {
+            Serial.println(F("🔔 Calling sendDataCallback for anonymous mode"));
+            sendDataCallback("anonymous", heartRate, spo2);
+        }
+    } else {
+        Serial.println(F("⚠️ Conditions not met for sending data"));
+        Serial.print(F("  - isMeasuring: "));
+        Serial.println(isMeasuring ? "true" : "false");
+        Serial.print(F("  - isLoggedIn: "));
+        Serial.println(isLoggedIn ? "true" : "false");
+        Serial.print(F("  - isGuestMode: "));
+        Serial.println(isGuestMode ? "true" : "false");
+        Serial.print(F("  - userUID: '"));
+        Serial.print(userUID);
+        Serial.println(F("'"));
+    }
+    
+    // Reset measurement state after data is sent
+    isMeasuring = false;
+    Serial.println(F("🛑 Measurement state reset - ready for new measurement"));
+    
+    Serial.println(F("🏁 sendSensorData() completed"));
+}
 String WiFiManager::getConnectionInfo() const {
     String info = "Connection Status:\n";
     info += "- WiFi Mode: ";

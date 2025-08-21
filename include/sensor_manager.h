@@ -26,7 +26,9 @@
 #define MAX_VALID_SPO2 100             // Maximum physiologically valid SpO2
 #define IR_SIGNAL_THRESHOLD 20000      // Threshold for IR signal detection
 #define RED_SIGNAL_THRESHOLD 15000     // Threshold for red signal detection
-#define SIGNAL_SATURATION_LIMIT 200000 // Upper limit suggesting sensor saturation
+#define SIGNAL_SATURATION_LIMIT 350000 // Upper limit suggesting sensor saturation (increased for stronger signals)
+#define REQUIRED_VALID_READINGS 5      // Number of valid readings required before averaging
+#define MEASUREMENT_TIMEOUT_MS 120000   // Maximum time to wait for 5 valid readings (120 seconds - longer for I2C recovery)
 
 class SensorManager {
 private:
@@ -44,9 +46,19 @@ private:
     int sda_pin;           // SDA pin for I2C
     int scl_pin;           // SCL pin for I2C
     
+    // Measurement averaging system
+    int32_t validReadings[REQUIRED_VALID_READINGS][2]; // Store [HR, SpO2] pairs
+    int validReadingCount; // Current count of valid readings
+    bool isMeasuring;      // Whether measurement is in progress
+    int32_t averagedHR;    // Final averaged heart rate
+    int32_t averagedSpO2;  // Final averaged SpO2
+    bool measurementComplete; // Flag indicating measurement is complete
+    unsigned long measurementStartTime; // Time when measurement started
+    
     // Callbacks
     void (*updateReadingsCallback)(int32_t hr, bool validHR, int32_t spo2, bool validSPO2);
     void (*updateFingerStatusCallback)(bool fingerDetected);
+    void (*measurementCompleteCallback)(int32_t avgHR, int32_t avgSpO2);
 
 public:
     SensorManager(int bufferSize = 100);
@@ -67,9 +79,19 @@ public:
     bool isReady() const { return sensorReady; }
     bool isFingerDetected() const;
     
+    // Measurement control
+    void startMeasurement();
+    void stopMeasurement();
+    bool isMeasurementInProgress() const { return isMeasuring; }
+    bool isMeasurementReady() const { return measurementComplete; }
+    int32_t getAveragedHR() const { return averagedHR; }
+    int32_t getAveragedSpO2() const { return averagedSpO2; }
+    int getValidReadingCount() const { return validReadingCount; }
+    
     // Set callbacks
     void setUpdateReadingsCallback(void (*callback)(int32_t hr, bool validHR, int32_t spo2, bool validSPO2));
     void setUpdateFingerStatusCallback(void (*callback)(bool fingerDetected));
+    void setMeasurementCompleteCallback(void (*callback)(int32_t avgHR, int32_t avgSpO2));
     
     void setReady(bool ready) { sensorReady = ready; }
 };

@@ -11,12 +11,25 @@ SensorManager::SensorManager(int bufferSize) :
     i2cErrorCount(0),
     sda_pin(0),
     scl_pin(0),
+    validReadingCount(0),
+    isMeasuring(false),
+    averagedHR(0),
+    averagedSpO2(0),
+    measurementComplete(false),
+    measurementStartTime(0),
     updateReadingsCallback(nullptr),
-    updateFingerStatusCallback(nullptr) {
+    updateFingerStatusCallback(nullptr),
+    measurementCompleteCallback(nullptr) {
     
     particleSensor = new MAX30105();
     irBuffer = new uint32_t[bufferSize];
     redBuffer = new uint32_t[bufferSize];
+    
+    // Initialize valid readings array
+    for (int i = 0; i < REQUIRED_VALID_READINGS; i++) {
+        validReadings[i][0] = 0; // HR
+        validReadings[i][1] = 0; // SpO2
+    }
 }
 
 SensorManager::~SensorManager() {
@@ -43,51 +56,31 @@ void SensorManager::initializeSensor() {
         return;
     }
 
-    // Configure sensor with optimal settings for SpO2 and HR measurements
     Serial.println(F("Configuring sensor for optimal readings..."));
     
-    // Use consistent settings optimized for accurate measurements using predefined constants
-    byte ledBrightness = LED_BRIGHTNESS_DEFAULT;  // Reduced brightness to avoid saturation
-    byte sampleAverage = SAMPLE_AVERAGE;          // Average samples for better noise reduction
-    byte ledMode = LED_MODE_SPO2;                 // Use RED + IR for SpO2 measurement
-    byte sampleRate = SAMPLE_RATE;                // Sampling rate - good balance for HR detection
-    int pulseWidth = PULSE_WIDTH;                 // Maximum pulse width for better sensitivity
-    int adcRange = ADC_RANGE;                     // Default ADC range
+    // Use SparkFun example settings exactly
+    byte ledBrightness = 60;    // SparkFun example value
+    byte sampleAverage = 4;     // SparkFun example value  
+    byte ledMode = 2;           // SparkFun example: RED + IR
+    byte sampleRate = 100;      // SparkFun example value
+    int pulseWidth = 411;       // SparkFun example value
+    int adcRange = 4096;        // SparkFun example value
     
-    // Initialize with these consistent settings
+    // Configure sensor with SparkFun example settings
     particleSensor->setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
-    
-    // Critically reduce LED brightness to prevent sensor saturation
-    particleSensor->setPulseAmplitudeRed(LED_BRIGHTNESS_LOW);   // Reduced RED LED brightness
-    particleSensor->setPulseAmplitudeIR(LED_BRIGHTNESS_LOW);    // Reduced IR LED brightness
-    particleSensor->setPulseAmplitudeGreen(0);                  // Turn off GREEN LED completely
     
     Serial.println(F("Sensor configured for optimal readings."));
     Serial.println(F("Place finger on sensor. Initializing in 3 seconds..."));
     
-    // Allow time for setup without requiring user input
+    // Allow time for setup
     delay(3000);
     
     Serial.println(F("Sensor initialized."));
     
-    // Check initial readings and adjust if necessary
-    if (!particleSensor->available()) {
-        particleSensor->check();
-    }
-    
-    uint32_t initialRed = particleSensor->getRed();
-    uint32_t initialIR = particleSensor->getIR();
-    
-    Serial.print(F("Initial readings - RED: "));
-    Serial.print(initialRed);
-    Serial.print(F(", IR: "));
-    Serial.println(initialIR);
-    
-    // If readings are still too high, adjust further
-    if (initialRed > SIGNAL_SATURATION_LIMIT || initialIR > SIGNAL_SATURATION_LIMIT) {
-        particleSensor->setPulseAmplitudeRed(LED_BRIGHTNESS_VERY_LOW);   // Further reduce if needed
-        particleSensor->setPulseAmplitudeIR(LED_BRIGHTNESS_VERY_LOW);    // Further reduce if needed
-        Serial.println(F("Brightness reduced further to prevent saturation"));
+    // Clear buffers before starting
+    for (int i = 0; i < bufferLength; i++) {
+        redBuffer[i] = 0;
+        irBuffer[i] = 0;
     }
     
     sensorReady = true;
@@ -100,65 +93,25 @@ void SensorManager::readSensor() {
     }
     
     Serial.println(F("Starting initial sensor reading..."));
-    int errorCount = 0;
     
-    // Read the first 100 samples, and determine the signal range
+    // Follow SparkFun example exactly: read the first 100 samples to determine signal range
     for (byte i = 0; i < bufferLength; i++) {
-        bool readSuccess = false;
-        int retryCount = 0;
-        
-        // Try to read the sensor with retries
-        while (!readSuccess && retryCount < 3) {
-            try {
-                if (!particleSensor->available()) {
-                    particleSensor->check();
-                    // Give it a little time
-                    delay(10);
-                }
-                
-                if (particleSensor->available()) {
-                    redBuffer[i] = particleSensor->getRed();
-                    irBuffer[i] = particleSensor->getIR();
-                    particleSensor->nextSample();
-                    readSuccess = true;
-                }
-            } catch (...) {
-                errorCount++;
-                delay(10);
-            }
-            
-            retryCount++;
-        }
-        
-        // If read failed after retries and we have previous data, use that
-        if (!readSuccess && i > 0) {
-            redBuffer[i] = redBuffer[i-1];
-            irBuffer[i] = irBuffer[i-1];
+        while (!particleSensor->available()) { // do we have new data?
+            particleSensor->check(); // Check the sensor for new data
         }
 
-        // Only print every 10th reading to reduce serial output
-        if (i % 10 == 0) {
-            Serial.print(F("red="));
-            Serial.print(redBuffer[i], DEC);
-            Serial.print(F(", ir="));
-            Serial.println(irBuffer[i], DEC);
-        }
-    }
-    
-    // Check if we had too many errors
-    if (errorCount > 20) {
-        Serial.println(F("Too many errors during initial reading. Resetting sensor..."));
-        resetSensor();
-        return;
+        redBuffer[i] = particleSensor->getRed();
+        irBuffer[i] = particleSensor->getIR();
+        particleSensor->nextSample(); // We're finished with this sample so move to next sample
+
+        Serial.print(F("red="));
+        Serial.print(redBuffer[i], DEC);
+        Serial.print(F(", ir="));
+        Serial.println(irBuffer[i], DEC);
     }
 
-    // Calculate heart rate and SpO2 after first set of samples
+    // Calculate heart rate and SpO2 after first 100 samples (first 4 seconds of samples)
     maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
-    
-    // Additional validation for extreme values
-    if (heartRate > MAX_VALID_HR || heartRate < MIN_VALID_HR) {
-        validHeartRate = 0;
-    }
     
     // Update the readings via callback
     if (updateReadingsCallback) {
@@ -223,18 +176,15 @@ void SensorManager::resetSensor() {
         return;
     }
     
-    // Reconfigure the sensor with the same settings
-    byte ledBrightness = LED_BRIGHTNESS_DEFAULT;
-    byte sampleAverage = SAMPLE_AVERAGE;
-    byte ledMode = LED_MODE_SPO2;
-    byte sampleRate = SAMPLE_RATE;
-    int pulseWidth = PULSE_WIDTH;
-    int adcRange = ADC_RANGE;
+    // Reconfigure the sensor with the same settings as SparkFun example
+    byte ledBrightness = 60;    // SparkFun example value
+    byte sampleAverage = 4;     // SparkFun example value  
+    byte ledMode = 2;           // SparkFun example: RED + IR
+    byte sampleRate = 100;      // SparkFun example value
+    int pulseWidth = 411;       // SparkFun example value
+    int adcRange = 4096;        // SparkFun example value
     
     particleSensor->setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
-    particleSensor->setPulseAmplitudeRed(LED_BRIGHTNESS_LOW);
-    particleSensor->setPulseAmplitudeIR(LED_BRIGHTNESS_LOW);
-    particleSensor->setPulseAmplitudeGreen(0);
     
     // Clear the buffers
     for (int i = 0; i < bufferLength; i++) {
@@ -260,45 +210,15 @@ void SensorManager::processReadings() {
     }
 
     // Take 25 sets of samples before calculating the heart rate.
-    int errorCount = 0;
     for (byte i = 75; i < 100; i++) {
-        bool readSuccess = false;
-        int retryCount = 0;
-        
-        // Try to read the sensor with retries
-        while (!readSuccess && retryCount < 3) {
-            try {
-                // Check if sensor has data
-                if (!particleSensor->available()) {
-                    particleSensor->check();
-                    // Wait a bit for data to become available
-                    delay(10);
-                }
-                
-                if (particleSensor->available()) {
-                    redBuffer[i] = particleSensor->getRed();
-                    irBuffer[i] = particleSensor->getIR();
-                    particleSensor->nextSample();
-                    readSuccess = true;
-                }
-            } catch (...) {
-                // Catch any exceptions during sensor reading
-                Serial.println(F("Error reading sensor data"));
-                errorCount++;
-                delay(10);
-            }
-            
-            retryCount++;
+        while (!particleSensor->available()) { // do we have new data?
+            particleSensor->check(); // Check the sensor for new data
         }
-        
-        // If we couldn't read after retries, use previous values
-        if (!readSuccess) {
-            if (i > 0) {
-                redBuffer[i] = redBuffer[i-1];
-                irBuffer[i] = irBuffer[i-1];
-            }
-        }
-        
+
+        redBuffer[i] = particleSensor->getRed();
+        irBuffer[i] = particleSensor->getIR();
+        particleSensor->nextSample(); // We're finished with this sample so move to next sample
+
         // Send samples and calculation result to terminal program through UART
         Serial.print(F("red="));
         Serial.print(redBuffer[i], DEC);
@@ -318,21 +238,143 @@ void SensorManager::processReadings() {
         Serial.println(validSPO2, DEC);
     }
     
-    // Check if we encountered too many errors
-    if (errorCount > 10) {
-        Serial.println(F("Too many sensor read errors. Resetting sensor..."));
-        resetSensor();
-        return;
-    }
-
     // After gathering 25 new samples recalculate HR and SP02
     maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
     
     // Additional validation for extreme HR values
-    if (heartRate > MAX_VALID_HR || heartRate < MIN_VALID_HR) {
-        // If heart rate is outside physiological range, mark it as invalid
+    if (heartRate == -999) {
         validHeartRate = 0;
-        Serial.println(F("Heart rate outside physiological range, marked as invalid"));
+        Serial.print(F("Heart rate algorithm invalid ("));
+        Serial.print(heartRate);
+        Serial.println(F("), marked as invalid"));
+    } else if (heartRate > MAX_VALID_HR || heartRate < MIN_VALID_HR) {
+        validHeartRate = 0;
+        Serial.print(F("Heart rate outside range ("));
+        Serial.print(heartRate);
+        Serial.println(F("), marked as invalid"));
+    }
+    
+    // Additional validation for SpO2 values
+    if (spo2 == -999) {
+        validSPO2 = 0;
+        Serial.print(F("SpO2 algorithm invalid ("));
+        Serial.print(spo2);
+        Serial.println(F("), marked as invalid"));
+    } else if (spo2 > MAX_VALID_SPO2 || spo2 < MIN_VALID_SPO2) {
+        validSPO2 = 0;
+        Serial.print(F("SpO2 outside range ("));
+        Serial.print(spo2);
+        Serial.println(F("), marked as invalid"));
+    }
+    
+    Serial.print(F("Calculated - HR="));
+    Serial.print(heartRate);
+    Serial.print(F(", HRvalid="));
+    Serial.print(validHeartRate);
+    Serial.print(F(", SPO2="));
+    Serial.print(spo2);
+    Serial.print(F(", SPO2Valid="));
+    Serial.println(validSPO2);
+    
+    // Store current valid reading for display
+    if (validHeartRate && validSPO2) {
+        Serial.print(F("Current valid reading: HR="));
+        Serial.print(heartRate);
+        Serial.print(F(", SpO2="));
+        Serial.println(spo2);
+    }
+    
+    // Handle measurement averaging logic
+    if (isMeasuring && !measurementComplete) {
+        // Check for timeout
+        if (millis() - measurementStartTime > MEASUREMENT_TIMEOUT_MS) {
+            Serial.println(F("⏰ Measurement timeout! Could not get 5 valid readings in time."));
+            Serial.print(F("Got "));
+            Serial.print(validReadingCount);
+            Serial.print(F("/"));
+            Serial.print(REQUIRED_VALID_READINGS);
+            Serial.println(F(" valid readings"));
+            
+            isMeasuring = false;
+            measurementComplete = false;
+            
+            Serial.println(F("Please ensure finger is properly placed and try again."));
+            return;
+        }
+        
+        // Only add reading if both HR and SpO2 are valid
+        if (validHeartRate && validSPO2) {
+            validReadings[validReadingCount][0] = heartRate;
+            validReadings[validReadingCount][1] = spo2;
+            validReadingCount++;
+            
+            Serial.print(F("✓ Valid reading "));
+            Serial.print(validReadingCount);
+            Serial.print(F("/"));
+            Serial.print(REQUIRED_VALID_READINGS);
+            Serial.print(F(": HR="));
+            Serial.print(heartRate);
+            Serial.print(F(", SpO2="));
+            Serial.print(spo2);
+            Serial.print(F(" (elapsed: "));
+            Serial.print((millis() - measurementStartTime) / 1000);
+            Serial.println(F("s)"));
+            
+            // Check if we have enough valid readings
+            if (validReadingCount >= REQUIRED_VALID_READINGS) {
+                // Calculate averages
+                int32_t totalHR = 0;
+                int32_t totalSpO2 = 0;
+                
+                for (int i = 0; i < REQUIRED_VALID_READINGS; i++) {
+                    totalHR += validReadings[i][0];
+                    totalSpO2 += validReadings[i][1];
+                }
+                
+                averagedHR = totalHR / REQUIRED_VALID_READINGS;
+                averagedSpO2 = totalSpO2 / REQUIRED_VALID_READINGS;
+                measurementComplete = true;
+                isMeasuring = false;
+                
+                Serial.println(F("🎉 MEASUREMENT COMPLETE 🎉"));
+                Serial.print(F("✅ Averaged HR: "));
+                Serial.println(averagedHR);
+                Serial.print(F("✅ Averaged SpO2: "));
+                Serial.println(averagedSpO2);
+                Serial.print(F("⏱️ Total time: "));
+                Serial.print((millis() - measurementStartTime) / 1000);
+                Serial.println(F(" seconds"));
+                Serial.println(F("🎯 Calling measurement complete callback..."));
+                
+                // Call measurement complete callback
+                if (measurementCompleteCallback) {
+                    Serial.println(F("📞 Executing measurementCompleteCallback"));
+                    measurementCompleteCallback(averagedHR, averagedSpO2);
+                    Serial.println(F("✅ Callback execution complete"));
+                } else {
+                    Serial.println(F("❌ No measurementCompleteCallback registered!"));
+                }
+            }
+        } else {
+            // Continue measuring despite invalid reading
+            Serial.print(F("✗ Invalid reading (HR="));
+            Serial.print(heartRate);
+            Serial.print(F(", valid="));
+            Serial.print(validHeartRate);
+            Serial.print(F(", SpO2="));
+            Serial.print(spo2);
+            Serial.print(F(", valid="));
+            Serial.print(validSPO2);
+            Serial.print(F(") - Progress: "));
+            Serial.print(validReadingCount);
+            Serial.print(F("/"));
+            Serial.print(REQUIRED_VALID_READINGS);
+            Serial.print(F(" (elapsed: "));
+            Serial.print((millis() - measurementStartTime) / 1000);
+            Serial.println(F("s)"));
+            
+            // Keep measuring! The measurement continues until we get 5 valid readings or timeout
+        }
     }
     
     // Update the readings via callback
@@ -351,6 +393,10 @@ bool SensorManager::isFingerDetected() const {
     if (!sensorReady) {
         return false;
     }
+    
+    // During measurement, be less strict about finger detection to avoid false negatives
+    uint32_t threshold_ir = isMeasuring ? (IR_SIGNAL_THRESHOLD * 0.7) : IR_SIGNAL_THRESHOLD;
+    uint32_t threshold_red = isMeasuring ? (RED_SIGNAL_THRESHOLD * 0.7) : RED_SIGNAL_THRESHOLD;
     
     // We'll use the last 10 samples to make a more stable decision
     const int sampleCount = 10;
@@ -373,6 +419,9 @@ bool SensorManager::isFingerDetected() const {
     
     // If we don't have enough valid samples, finger is not detected
     if (validSamples < 3) {
+        Serial.print(F("🔍 Finger detection: Not enough valid samples ("));
+        Serial.print(validSamples);
+        Serial.println(F(")"));
         return false;
     }
     
@@ -382,8 +431,21 @@ bool SensorManager::isFingerDetected() const {
     
     // Check if IR signal is in the expected range for a finger
     // and IR is significantly larger than red (typical for a finger on sensor)
-    bool signalPresent = (avgIR > IR_SIGNAL_THRESHOLD) && (avgRed > RED_SIGNAL_THRESHOLD);
+    bool signalPresent = (avgIR > threshold_ir) && (avgRed > threshold_red);
     bool properRatio = (avgIR > avgRed * 0.8); // IR should be larger than red for a finger
+    
+    if (!signalPresent || !properRatio) {
+        Serial.print(F("🔍 Finger detection failed - avgIR: "));
+        Serial.print(avgIR);
+        Serial.print(F(" (need >"));
+        Serial.print(threshold_ir);
+        Serial.print(F("), avgRed: "));
+        Serial.print(avgRed);
+        Serial.print(F(" (need >"));
+        Serial.print(threshold_red);
+        Serial.print(F("), ratio OK: "));
+        Serial.println(properRatio ? "YES" : "NO");
+    }
     
     return signalPresent && properRatio;
 }
@@ -394,4 +456,43 @@ void SensorManager::setUpdateReadingsCallback(void (*callback)(int32_t hr, bool 
 
 void SensorManager::setUpdateFingerStatusCallback(void (*callback)(bool fingerDetected)) {
     updateFingerStatusCallback = callback;
+}
+
+void SensorManager::setMeasurementCompleteCallback(void (*callback)(int32_t avgHR, int32_t avgSpO2)) {
+    measurementCompleteCallback = callback;
+}
+
+void SensorManager::startMeasurement() {
+    Serial.println(F("🔄 startMeasurement() called"));
+    Serial.print(F("Current state - isMeasuring: "));
+    Serial.print(isMeasuring);
+    Serial.print(F(", validReadingCount: "));
+    Serial.println(validReadingCount);
+    
+    Serial.println(F("Starting new measurement session..."));
+    isMeasuring = true;
+    measurementComplete = false;
+    validReadingCount = 0;
+    averagedHR = 0;
+    averagedSpO2 = 0;
+    measurementStartTime = millis();
+    
+    // Clear previous readings
+    for (int i = 0; i < REQUIRED_VALID_READINGS; i++) {
+        validReadings[i][0] = 0;
+        validReadings[i][1] = 0;
+    }
+    
+    Serial.print(F("Need "));
+    Serial.print(REQUIRED_VALID_READINGS);
+    Serial.print(F(" valid readings for averaging (timeout: "));
+    Serial.print(MEASUREMENT_TIMEOUT_MS / 1000);
+    Serial.println(F(" seconds)..."));
+}
+
+void SensorManager::stopMeasurement() {
+    Serial.println(F("🔄 stopMeasurement() called"));
+    isMeasuring = false;
+    measurementComplete = false;
+    validReadingCount = 0;
 }
