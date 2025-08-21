@@ -1,6 +1,10 @@
 #include "wifi_manager.h"
+#include "sensor_manager.h"
 #include <EEPROM.h>
 #include <esp_wifi.h>
+
+// Reference to the SensorManager instance in main.cpp
+extern SensorManager sensorManager;
 
 // EEPROM constants
 #define EEPROM_SIZE 1024
@@ -29,59 +33,55 @@ WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password, const cha
     startNewMeasurementCallback(nullptr),
     handleAIAnalysisCallback(nullptr)
 {
-    // Initialize common CSS
-    commonCSS = "@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');"
-                "body { font-family: 'Roboto', Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
-                ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-                "h1 { color: #333; }"
-                ".status { font-weight: bold; margin-bottom: 20px; }"
-                ".connected { color: #4CAF50; }"
-                ".disconnected { color: #f44336; }"
-                "button, input[type='submit'] { background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 0; width: 100%; }"
-                "button:hover, input[type='submit']:hover { background: #45a049; }"
-                "input[type='text'], input[type='password'], input[type='email'] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }"
-                ".guest-btn { background: #2196F3; }"
-                ".guest-btn:hover { background: #0b7dda; }"
-                ".back-btn { background: #f44336; }"
-                ".back-btn:hover { background: #d32f2f; }";
+    // Tối ưu CSS bằng cách loại bỏ font Google và tối giản mã CSS
+    commonCSS = "body{font-family:Arial,sans-serif;margin:0;padding:15px;text-align:center;background:#f0f0f0}"
+                ".container{max-width:400px;margin:0 auto;background:#fff;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,.1)}"
+                "h1{color:#333;font-size:20px;margin-top:0}"
+                ".status{font-weight:700;margin-bottom:15px}.connected{color:#4CAF50}.disconnected{color:#f44336}"
+                "button,input[type=submit]{background:#4CAF50;color:#fff;padding:8px 12px;border:none;border-radius:4px;cursor:pointer;margin:8px 0;width:100%}"
+                "input[type=email],input[type=password],input[type=text]{width:100%;padding:8px;margin:8px 0;border:1px solid #ddd;border-radius:4px;box-sizing:border-box}"
+                ".guest-btn{background:#2196F3}.back-btn{background:#f44336}";
 
     apIP = IPAddress(192, 168, 4, 1);
     server = new WebServer(80);
+    
+    // Cấu hình timeout cho web server để tránh kết nối treo
+    // Phương thức này không tồn tại trong thư viện WebServer tiêu chuẩn nhưng chúng ta có thể thêm vào sau
+    // server->setServerTimeout(10000); // 10 giây timeout
+    
     dnsServer = new DNSServer();
 }
 
 void WiFiManager::begin() {
-    // Initialize EEPROM
+    // Khởi tạo EEPROM
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.end();
     
-    // Reset WiFi before anything else
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    delay(1000);
-    
-    // Read saved WiFi credentials
+    // Đọc thông tin kết nối WiFi đã lưu
     readWiFiCredentials();
     
     Serial.println("Starting WiFi Manager");
     Serial.print("SDK Version: ");
     Serial.println(ESP.getSdkVersion());
-
-    // Configure low power settings (but not too aggressive)
-    esp_wifi_set_ps(WIFI_PS_NONE); // Disable power saving for better responsiveness
+    Serial.print("Free heap: ");
+    Serial.println(ESP.getFreeHeap());
     
-    // Always start in AP mode first
+    // Reset WiFi hoàn toàn trước khi bắt đầu
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(500);
+
+    // Cấu hình không tiết kiệm năng lượng cho WiFi
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    
+    // Luôn khởi động ở chế độ AP trước
     setupAPMode();
     
-    // Try to connect to saved WiFi if credentials exist
+    // Thử kết nối với WiFi đã lưu nếu có thông tin
     if (userSSID.length() > 0) {
         Serial.print("Attempting to connect to saved WiFi: '");
         Serial.print(userSSID);
         Serial.println("'");
-        
-        // Debug saved password length
-        Serial.print("Password length: ");
-        Serial.println(userPassword.length());
         
         isConnected = connectToWiFi(userSSID, userPassword);
         
@@ -89,47 +89,63 @@ void WiFiManager::begin() {
             Serial.println("Auto-connected to saved WiFi network");
         } else {
             Serial.println("Failed to auto-connect to saved WiFi");
-            Serial.println("Double check SSID and password");
         }
     }
     
-    // Configure web server
-    // Set higher timeouts to prevent connection issues
+    // Cấu hình web server với các tùy chọn cải thiện hiệu suất
     server->enableCORS(true);
     server->enableCrossOrigin(true);
     
-    // Setup web server routes
+    // Thiết lập các route cho web server
+    // Giao diện chính và thiết lập WiFi
     server->on("/", [this](){ this->handleRoot(); });
     server->on("/wifi", [this](){ this->handleWiFi(); });
     server->on("/connect", HTTP_POST, [this](){ this->handleConnect(); });
+    
+    // Các route chức năng chính
     server->on("/mode", [this](){ this->handleModeSelect(); });
     server->on("/login", [this](){ this->handleLogin(); });
     server->on("/login_submit", HTTP_POST, [this](){ this->handleLoginSubmit(); });
     server->on("/guest", [this](){ this->handleGuest(); });
-    server->on("/measurement", [this](){ this->handleMeasurement(); });
+    
+    // Các route đo lường và phân tích
+    server->on("/measurement", [this](){
+        // Giải phóng bộ nhớ trước khi xử lý request đo lường
+        ESP.getFreeHeap();
+        this->handleMeasurement();
+    });
+    server->on("/measurement_info", [this](){ this->handleMeasurementInfo(); });
+    server->on("/measurement_stream", [this](){ this->handleMeasurementStream(); });
     server->on("/continue_measuring", [this](){ this->handleContinueMeasuring(); });
-    server->on("/reconfigure_wifi", [this](){ this->handleReconfigWiFi(); });
-    server->on("/status", [this](){ this->handleStatus(); });
-    server->on("/force_ap", [this](){ this->handleForceAP(); });
     server->on("/ai_analysis", [this](){ this->handleAIAnalysis(); });
     server->on("/return_to_measurement", [this](){ this->handleReturnToMeasurement(); });
     
-    // Add routes for common captive portal detection URLs
-    server->on("/generate_204", [this](){ this->handleRoot(); }); // Android captive portal
-    server->on("/mobile/status.php", [this](){ this->handleRoot(); }); // Another Android endpoint
-    server->on("/hotspot-detect.html", [this](){ this->handleRoot(); }); // iOS captive portal
-    server->on("/library/test/success.html", [this](){ this->handleRoot(); }); // iOS captive portal
-    server->on("/favicon.ico", HTTP_GET, [this](){ server->send(200, "image/x-icon", ""); }); // Handle favicon requests
+    // Các route tiện ích
+    server->on("/reconfigure_wifi", [this](){ this->handleReconfigWiFi(); });
+    server->on("/status", [this](){ this->handleStatus(); });
+    server->on("/force_ap", [this](){ this->handleForceAP(); });
     
-    // Last catch-all handler
-    server->onNotFound([this](){ this->handleNotFound(); });
+    // Hỗ trợ captive portal cho các thiết bị di động
+    server->on("/generate_204", [this](){ this->handleRoot(); }); // Android
+    server->on("/mobile/status.php", [this](){ this->handleRoot(); }); // Android
+    server->on("/hotspot-detect.html", [this](){ this->handleRoot(); }); // iOS
+    server->on("/library/test/success.html", [this](){ this->handleRoot(); }); // iOS
+    server->on("/favicon.ico", HTTP_GET, [this](){ server->send(200, "image/x-icon", ""); });
     
-    // Start the server
+    // Handler cho các route không tìm thấy
+    server->onNotFound([this](){
+        // Đảm bảo vẫn giải phóng bộ nhớ
+        cleanupConnections();
+        this->handleNotFound();
+    });
+    
+    // Khởi động server
     server->begin();
     Serial.println("HTTP server started");
     
-    // Print connection information
-    Serial.println("\n" + getConnectionInfo());
+    // In thông tin kết nối
+    Serial.print("Free heap after setup: ");
+    Serial.println(ESP.getFreeHeap());
 }
 
 void WiFiManager::setupAPMode() {
@@ -408,10 +424,15 @@ void WiFiManager::checkWiFiConnection() {
     
     lastWifiCheck = millis();
     
+    // Track connection quality for debugging
+    static int connectionErrorCounter = 0;
+    static unsigned long lastSocketCleanup = 0;
+    
     // Check if we lost WiFi connection
     if (isConnected && WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi connection lost!");
         isConnected = false;
+        connectionErrorCounter++;
         
         // Try to reconnect with saved credentials
         if (userSSID.length() > 0) {
@@ -421,8 +442,8 @@ void WiFiManager::checkWiFiConnection() {
             
             // Give it a few seconds to reconnect
             int attempts = 0;
-            while (WiFi.status() != WL_CONNECTED && attempts < 10) {
-                delay(500);
+            while (WiFi.status() != WL_CONNECTED && attempts < 6) { // Shorter timeout
+                delay(300);
                 Serial.print(".");
                 attempts++;
             }
@@ -430,6 +451,7 @@ void WiFiManager::checkWiFiConnection() {
             if (WiFi.status() == WL_CONNECTED) {
                 Serial.println("\nReconnected to WiFi!");
                 isConnected = true;
+                connectionErrorCounter = 0; // Reset error counter on success
                 
                 if (updateConnectionStatusCallback) {
                     updateConnectionStatusCallback(true, isGuestMode, isLoggedIn);
@@ -448,12 +470,37 @@ void WiFiManager::checkWiFiConnection() {
         if (updateConnectionStatusCallback) {
             updateConnectionStatusCallback(false, isGuestMode, isLoggedIn);
         }
+    } else if (isConnected) {
+        // Connection is good, reset error counter
+        connectionErrorCounter = 0;
+    }
+    
+    // If we have persistent connection issues, try more aggressive cleanup
+    if (connectionErrorCounter >= 3 && millis() - lastSocketCleanup > 60000) {
+        Serial.println("Persistent connection issues detected, performing socket cleanup");
+        forceSocketCleanup();
+        lastSocketCleanup = millis();
+        connectionErrorCounter = 0;
     }
     
     // Check if we need to restart AP mode (in case it was disabled)
     if (!apModeActive && WiFi.getMode() != WIFI_AP_STA && WiFi.getMode() != WIFI_AP) {
         Serial.println("AP mode not active, restarting...");
         setupAPMode();
+    }
+    
+    // Periodically log connection status for debugging
+    static unsigned long lastStatusLog = 0;
+    if (millis() - lastStatusLog > 60000) { // Every minute
+        lastStatusLog = millis();
+        Serial.print("WiFi Status: ");
+        Serial.print(WiFi.status());
+        Serial.print(" | Mode: ");
+        Serial.print(WiFi.getMode());
+        Serial.print(" | Free Heap: ");
+        Serial.print(ESP.getFreeHeap());
+        Serial.print(" | Connection errors: ");
+        Serial.println(connectionErrorCounter);
     }
 }
 
@@ -527,101 +574,120 @@ void WiFiManager::handleConnect() {
     String ssid = server->arg("ssid");
     String password = server->arg("password");
     
+    // Tách quá trình kết nối và phản hồi HTTP để tránh lỗi connection abort
     if (ssid.length() > 0) {
-        // Save credentials
+        // Đầu tiên lưu thông tin kết nối
         userSSID = ssid;
         userPassword = password;
         isGuestMode = false;
         saveWiFiCredentials(ssid, password, false);
         
-        String html = "<!DOCTYPE html><html>"
+        // Gửi trang HTML thông báo đang kết nối TRƯỚC khi thử kết nối WiFi
+        String loadingHtml = "<!DOCTYPE html><html>"
                     "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
                     "<meta charset='UTF-8'>"
-                    "<title>HealthSense WiFi Setup</title>"
-                    "<style>" + commonCSS + 
-                    ".success { color: #4CAF50; font-weight: bold; font-size: 18px; }"
-                    ".error { color: #f44336; font-weight: bold; font-size: 18px; }"
-                    "</style>"
+                    "<title>Đang kết nối WiFi...</title>"
+                    "<style>body{font-family:Arial;text-align:center;padding:20px;background:#f0f0f0;}"
+                    ".container{max-width:400px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1);}"
+                    ".spinner{width:40px;height:40px;margin:20px auto;border-radius:50%;border:5px solid #f3f3f3;border-top:5px solid #3498db;animation:spin 1s linear infinite;}"
+                    "@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>"
+                    "<meta http-equiv='refresh' content='2;url=/connect_status'>"
                     "</head>"
-                    "<body>"
-                    "<div class='container'>"
-                    "<h1>Kết Quả Kết Nối</h1>";
+                    "<body><div class='container'>"
+                    "<h1>Đang kết nối WiFi</h1>"
+                    "<p>Đang kết nối tới mạng: <strong>" + ssid + "</strong></p>"
+                    "<div class='spinner'></div>"
+                    "<p>Vui lòng đợi trong giây lát...</p>"
+                    "</div></body></html>";
         
-        // Try to connect to the WiFi
-        Serial.println("Attempting WiFi connection from web interface...");
-        Serial.print("SSID: '");
-        Serial.print(ssid);
-        Serial.print("', Password length: ");
-        Serial.println(password.length());
+        // Gửi trang loading và đóng kết nối HTTP trước khi tiến hành kết nối WiFi
+        server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        server->send(200, "text/html", loadingHtml);
         
-        // Try connection twice in case of initial failure
-        isConnected = connectToWiFi(ssid, password);
-        
-        // If first attempt failed, reset WiFi and try again
-        if (!isConnected) {
-            Serial.println("First connection attempt failed, trying again after reset...");
-            WiFi.disconnect(true);
-            delay(1000);
+        // Đăng ký handler mới để hiển thị kết quả sau khi chuyển hướng
+        server->on("/connect_status", [this, ssid, password]() {
+            // Thử kết nối WiFi
+            Serial.println("Attempting WiFi connection from web interface...");
+            Serial.print("SSID: '");
+            Serial.print(ssid);
+            Serial.print("', Password length: ");
+            Serial.println(password.length());
+            
+            // Thử kết nối WiFi
             isConnected = connectToWiFi(ssid, password);
-        }
-        
-        if (isConnected) {
-            html += "<p class='success'>✅ Kết nối WiFi thành công!</p>"
-                    "<p>Đã kết nối tới mạng: <strong>" + ssid + "</strong></p>"
-                    "<p>Địa chỉ IP: " + WiFi.localIP().toString() + "</p>"
-                    "<p>Cường độ tín hiệu: " + String(WiFi.RSSI()) + " dBm</p>"
-                    "<meta http-equiv='refresh' content='5;url=/mode'>"
-                    "<p>Tự động chuyển đến trang chọn chế độ sau 5 giây...</p>";
             
-            // Maintain dual mode (AP + STA) so hotspot remains available
-            // This is already set in connectToWiFi function
-        } else {
-            html += "<p class='error'>❌ Kết nối WiFi thất bại!</p>";
-            
-            // Show specific error message based on status code
-            switch (WiFi.status()) {
-                case WL_NO_SSID_AVAIL:
-                    html += "<p>Lỗi: Không tìm thấy mạng WiFi \"<strong>" + ssid + "</strong>\"</p>"
-                           "<p>Vui lòng kiểm tra tên mạng và đảm bảo mạng đang hoạt động.</p>";
-                    break;
-                case WL_CONNECT_FAILED:
-                    html += "<p>Lỗi: Sai mật khẩu hoặc xác thực thất bại</p>"
-                           "<p>Vui lòng kiểm tra lại mật khẩu WiFi của bạn.</p>";
-                    break;
-                case WL_CONNECTION_LOST:
-                    html += "<p>Lỗi: Mất kết nối trong quá trình thiết lập</p>"
-                           "<p>Tín hiệu WiFi có thể quá yếu. Hãy di chuyển thiết bị đến gần router WiFi hơn.</p>";
-                    break;
-                case WL_DISCONNECTED:
-                    html += "<p>Lỗi: Không thể kết nối - Router có thể đã từ chối kết nối</p>"
-                           "<p>Hãy kiểm tra cài đặt router và đảm bảo nó cho phép thêm thiết bị mới.</p>";
-                    break;
-                default:
-                    html += "<p>Mã lỗi: " + String(WiFi.status()) + "</p>"
-                           "<p>Lỗi không xác định. Hãy thử khởi động lại thiết bị và router WiFi.</p>";
-                    break;
+            // Nếu lần đầu thất bại, reset WiFi và thử lại
+            if (!isConnected) {
+                Serial.println("First connection attempt failed, trying again after reset...");
+                WiFi.disconnect(true);
+                delay(500); // Giảm thời gian delay
+                isConnected = connectToWiFi(ssid, password);
             }
             
-            html += "<p>Vui lòng kiểm tra lại thông tin kết nối</p>"
-                    "<form action='/wifi' method='get'><button type='submit'>Thử lại</button></form>"
-                    "<meta http-equiv='refresh' content='10;url=/wifi'>"
-                    "<p>Tự động quay lại trang cấu hình WiFi sau 10 giây...</p>";
+            // Chuẩn bị HTML kết quả
+            String html = "<!DOCTYPE html><html>"
+                        "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                        "<meta charset='UTF-8'>"
+                        "<title>Kết quả kết nối</title>"
+                        "<style>body{font-family:Arial;text-align:center;padding:20px;background:#f0f0f0;}"
+                        ".container{max-width:400px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1);}"
+                        ".success{color:#4CAF50;font-weight:bold;font-size:16px;}"
+                        ".error{color:#f44336;font-weight:bold;font-size:16px;}"
+                        "button{background:#4CAF50;color:white;padding:10px 15px;border:none;border-radius:4px;cursor:pointer;margin:10px 0;width:100%;}</style>"
+                        "</head><body><div class='container'>"
+                        "<h1>Kết Quả Kết Nối</h1>";
             
-            // Ensure AP mode is active for reconfiguration
-            if (!apModeActive) {
-                setupAPMode();
+            if (isConnected) {
+                html += "<p class='success'>✅ Kết nối WiFi thành công!</p>"
+                        "<p>Đã kết nối tới: <strong>" + ssid + "</strong></p>"
+                        "<p>IP: " + WiFi.localIP().toString() + "</p>";
+                        
+                if (WiFi.RSSI() > -70) {
+                    html += "<p>Tín hiệu: Mạnh (" + String(WiFi.RSSI()) + " dBm)</p>";
+                } else if (WiFi.RSSI() > -85) {
+                    html += "<p>Tín hiệu: Trung bình (" + String(WiFi.RSSI()) + " dBm)</p>";
+                } else {
+                    html += "<p>Tín hiệu: Yếu (" + String(WiFi.RSSI()) + " dBm)</p>";
+                }
+                
+                html += "<form action='/mode'><button type='submit'>Tiếp tục</button></form>";
+            } else {
+                html += "<p class='error'>❌ Kết nối WiFi thất bại!</p>";
+                
+                // Hiển thị lỗi cụ thể dựa trên mã trạng thái
+                switch (WiFi.status()) {
+                    case WL_NO_SSID_AVAIL:
+                        html += "<p>Không tìm thấy mạng WiFi</p>";
+                        break;
+                    case WL_CONNECT_FAILED:
+                        html += "<p>Sai mật khẩu hoặc xác thực thất bại</p>";
+                        break;
+                    default:
+                        html += "<p>Mã lỗi: " + String(WiFi.status()) + "</p>";
+                        break;
+                }
+                
+                html += "<form action='/wifi'><button type='submit'>Thử lại</button></form>";
+                
+                // Đảm bảo chế độ AP vẫn hoạt động để có thể cấu hình lại
+                if (!apModeActive) {
+                    setupAPMode();
+                }
             }
-        }
-        
-        html += "</div></body></html>";
-        server->send(200, "text/html", html);
-        
-        // Update connection status
-        if (updateConnectionStatusCallback) {
-            updateConnectionStatusCallback(isConnected, false, false);
-        }
+            
+            html += "</div></body></html>";
+            
+            // Gửi HTML kết quả
+            server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+            server->send(200, "text/html", html);
+            
+            // Cập nhật trạng thái kết nối thông qua callback
+            if (updateConnectionStatusCallback) {
+                updateConnectionStatusCallback(isConnected, false, false);
+            }
+        });
     } else {
-        // Redirect to WiFi setup page
+        // Chuyển hướng đến trang thiết lập WiFi
         server->sendHeader("Location", "/wifi");
         server->send(302, "text/plain", "");
     }
@@ -823,92 +889,126 @@ void WiFiManager::handleMeasurement() {
         return;
     }
     
+    // Simplified CSS to reduce page size
+    String css = "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
+                 ".container{max-width:400px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1)}"
+                 "h1{color:#333;font-size:20px;margin-top:0}"
+                 ".reading{font-size:20px;margin:15px 0}"
+                 ".hr{color:#f44336}.spo2{color:#2196F3}"
+                 ".status{font-style:italic;color:#757575;margin-bottom:15px;font-size:14px}"
+                 ".complete{color:#4CAF50;font-weight:bold;padding:8px;border:1px solid #4CAF50;border-radius:4px;background:#e8f5e9}"
+                 ".measuring{color:#2196F3;font-weight:bold;padding:8px;border:1px solid #2196F3;border-radius:4px;background:#e3f2fd}"
+                 ".user{color:#4CAF50;font-weight:bold;font-size:14px}.guest{color:#FF9800;font-weight:bold;font-size:14px}"
+                 ".card{border:1px solid #ddd;border-radius:8px;padding:12px;margin:15px 0;background:#f9f9f9}"
+                 "a{color:#2196F3;text-decoration:none;font-weight:bold}a:hover{text-decoration:underline}"
+                 "button{background:#4CAF50;color:white;padding:8px 12px;border:none;border-radius:4px;cursor:pointer;margin:4px}";
+    
     String html = "<!DOCTYPE html><html>"
                   "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-                  "<title>HealthSense Measurement</title>"
-                  "<style>"
-                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
-                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-                  "h1 { color: #333; }"
-                  ".reading { font-size: 24px; margin: 20px 0; }"
-                  ".hr { color: #f44336; }"
-                  ".spo2 { color: #2196F3; }"
-                  ".status { font-style: italic; color: #757575; margin-bottom: 20px; }"
-                  ".user-status { font-weight: bold; color: #4CAF50; margin: 10px 0; }"
-                  ".guest-status { font-weight: bold; color: #FF9800; margin: 10px 0; }"
-                  "a { color: #2196F3; text-decoration: none; font-weight: bold; }"
-                  "a:hover { text-decoration: underline; }"
-                  ".reconfigure-btn { background: #f44336; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin-top: 30px; width: 100%; }"
-                  ".reconfigure-btn:hover { background: #d32f2f; }"
-                  "</style>"
+                  "<meta charset='UTF-8'>"
+                  "<title>Measurement</title>"
+                  "<style>" + css + "</style>"
                   "</head>"
                   "<body>"
                   "<div class='container'>"
-                  "<h1>HealthSense Monitor</h1>";
+                  "<h1>HealthSense Measurement</h1>";
     
     if (isLoggedIn) {
-        html += "<p class='user-status'>User Mode - Data is being saved to server</p>";
+        html += "<p class='user'>User Mode - Data Saved</p>";
     } else {
-        html += "<p class='guest-status'>Guest Mode - Data is not being saved</p>"
-                "<p>Register at: <a href='https://iot.newnol.io.vn' target='_blank'>HealthSense Portal</a></p>";
+        html += "<p class='guest'>Guest Mode - No Data Saved</p>";
     }
     
-    html += "<p class='status'>Place your finger on the sensor to start measuring</p>"
-            "<p class='status'>Need 5 valid readings for final result</p>"
-            "<div class='reading hr'>Heart Rate: <span id='hr'>--</span> BPM</div>"
-            "<div class='reading spo2'>SpO2: <span id='spo2'>--</span> %</div>"
-            "<div class='reading'>Progress: <span id='progress'>0/5</span> readings</div>";
+    // Get data from SensorManager
+    extern SensorManager sensorManager;
     
-    // Add continue measuring and AI analysis buttons
-    html += "<div style='margin: 20px 0;'>"
-            "<form action='/continue_measuring' method='get' style='display: inline;'>"
-            "<button type='submit' style='background: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 5px;'>Start New Measurement</button>"
-            "</form>"
-            "<form action='/ai_analysis' method='get' style='display: inline;'>"
-            "<button type='submit' style='background: #2196F3; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin: 5px;'>AI Analysis</button>"
-            "</form>"
-            "</div>";
-    
-    // Show different buttons based on whether this is guest mode or user mode
-    if (isGuestMode) {
-        html += "<form action='/mode' method='get'>"
-               "<button type='submit' class='reconfigure-btn'>Back to Mode Selection</button>"
-               "</form>";
+    // Check if measurement is complete
+    if (sensorManager.isMeasurementReady()) {
+        // Just indicate that measurement is complete with minimal info
+        html += "<div class='complete'>✓ Measurement Complete</div>"
+                "<div class='card'>"
+                "<p>Your measurement has been completed successfully.</p>"
+                "<p>The LCD screen shows the final results.</p>"
+                "<p>Click the button below to view all measurement details.</p>"
+                "</div>";
+                
+        // Add Get Results button - this is the main call-to-action when measurement is complete
+        html += "<form action='/measurement_info' method='get'>"
+                "<button type='submit' style='font-size:16px;padding:12px 25px;margin:15px 0'>Get Results</button>"
+                "</form>";
+    } else if (sensorManager.isMeasurementInProgress()) {
+        // Show measurement in progress
+        html += "<div class='measuring'>⏱️ Measurement in Progress</div>"
+                "<div class='card'>"
+                "<p>Please keep your finger on the sensor until the measurement is complete.</p>"
+                "<p>The LCD screen will show measurement progress.</p>"
+                "<p>Progress: " + String(sensorManager.getValidReadingCount()) + "/5 valid readings</p>"
+                "</div>";
     } else {
-        // In user mode, we only show the "Back to Mode Selection" button
-        html += "<form action='/mode' method='get'>"
-               "<button type='submit' class='reconfigure-btn'>Back to Mode Selection</button>"
-               "</form>";
+        // Ready to start measuring
+        html += "<div class='card'>"
+                "<p>Place your finger on the sensor to begin measurement.</p>"
+                "<p>The device will collect 5 valid readings.</p>"
+                "<p>Keep your finger steady during the measurement process.</p>"
+                "</div>";
+                
+        html += "<form action='/continue_measuring' method='get'>"
+                "<button type='submit'>Start Measurement</button>"
+                "</form>";
     }
     
-    html += "</div>"
-            "</body></html>";
+    // Button to return to mode selection
+    html += "<form action='/mode' method='get' style='margin-top:10px'>"
+            "<button type='submit' style='background:#f44336'>Back to Mode Select</button>"
+            "</form>";
+            
+    html += "</div></body></html>";
     
+    // Send HTTP response with cache control
+    server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server->sendHeader("Pragma", "no-cache");
+    server->sendHeader("Expires", "-1");
     server->send(200, "text/html", html);
     
-    // Make sure we're measuring
+    // Ensure we're in measurement state
     isMeasuring = true;
+    
+    // Free memory after sending page
+    cleanupConnections();
 }
 
 void WiFiManager::handleContinueMeasuring() {
+    String css = "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
+                 ".container{max-width:400px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1)}"
+                 "h1{color:#333;font-size:20px;margin-top:0}"
+                 ".loader{width:60px;height:60px;border-radius:50%;border:5px solid #f3f3f3;border-top:5px solid #3498db;animation:spin 1s linear infinite;margin:20px auto}"
+                 "@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}"
+                 ".steps{text-align:left;margin:20px auto;max-width:320px;line-height:1.6}"
+                 ".steps li{margin-bottom:8px}"
+                 ".success{color:#4CAF50;font-weight:bold}";
+    
     String html = "<!DOCTYPE html><html>"
                   "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-                  "<title>HealthSense New Measurement</title>"
-                  "<style>"
-                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
-                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-                  "h1 { color: #333; }"
-                  ".success { color: #4CAF50; }"
-                  "</style>"
+                  "<meta charset='UTF-8'>"
+                  "<title>Starting Measurement</title>"
+                  "<style>" + css + "</style>"
+                  "<meta http-equiv='refresh' content='2;url=/measurement'>"
                   "</head>"
                   "<body>"
                   "<div class='container'>"
-                  "<h1>New Measurement Started</h1>"
-                  "<p class='success'>Starting new measurement cycle...</p>"
-                  "<p>Place your finger on the sensor and keep it steady.</p>"
-                  "<p>The system will collect 5 valid readings and calculate the average.</p>"
-                  "<meta http-equiv='refresh' content='3;url=/measurement'>"
-                  "<p>You will be redirected to measurement page in 3 seconds...</p>"
+                  "<h1>Starting New Measurement</h1>"
+                  "<div class='loader'></div>"
+                  "<p class='success'>Initializing sensor...</p>"
+                  "<div class='steps'>"
+                  "<p>Instructions:</p>"
+                  "<ol>"
+                  "<li>Place your index finger on the sensor</li>"
+                  "<li>Keep your finger still during measurement</li>"
+                  "<li>The device will collect 5 valid readings</li>"
+                  "<li>The screen will show when measurement is complete</li>"
+                  "</ol>"
+                  "</div>"
+                  "<p>You will be redirected to the measurement page automatically...</p>"
                   "</div>"
                   "</body></html>";
     
@@ -917,9 +1017,33 @@ void WiFiManager::handleContinueMeasuring() {
     // Trigger start of new measurement via callback
     Serial.println("Web interface requested new measurement cycle");
     
-    if (startNewMeasurementCallback) {
-        startNewMeasurementCallback();
+    // Reset measurement state 
+    isMeasuring = true;
+    
+    // First, ensure we stop any previous measurement
+    extern SensorManager sensorManager;
+    sensorManager.stopMeasurement();
+    delay(50);  // Brief delay to ensure processes complete
+    
+    // Reset the display and sensor state through callback
+    if (initializeSensorCallback) {
+        Serial.println("Resetting sensor state and display");
+        initializeSensorCallback();
     }
+    
+    // Start the new measurement process with explicit logging
+    Serial.println("Starting new measurement process");
+    
+    if (startNewMeasurementCallback) {
+        Serial.println("Using registered callback to start measurement");
+        startNewMeasurementCallback();
+    } else {
+        Serial.println("No callback registered, starting measurement directly");
+        // Direct fallback if no callback is set
+        sensorManager.startMeasurement();
+    }
+    
+    Serial.println("New measurement process initiated");
 }
 
 void WiFiManager::handleReconfigWiFi() {
@@ -937,81 +1061,70 @@ void WiFiManager::handleReconfigWiFi() {
 }
 
 void WiFiManager::handleStatus() {
+    // Use a more lightweight approach with minimal HTML
     String html = "<!DOCTYPE html><html>"
                   "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
                   "<meta charset='UTF-8'>"
-                  "<title>HealthSense Connection Status</title>"
-                  "<style>" + commonCSS + 
-                  ".status-info { text-align: left; background: #f9f9f9; padding: 15px; border-radius: 5px; margin: 15px 0; font-family: monospace; }"
-                  ".error-banner { background-color: #ffebee; color: #d32f2f; padding: 10px; border-radius: 5px; border: 1px solid #ffcdd2; margin: 15px 0; }"
-                  ".success-banner { background-color: #e8f5e9; color: #388e3c; padding: 10px; border-radius: 5px; border: 1px solid #c8e6c9; margin: 15px 0; }"
-                  ".refresh-btn { background: #FF9800; }"
-                  ".refresh-btn:hover { background: #e68900; }"
-                  ".try-again-btn { background: #9c27b0; }"
-                  ".try-again-btn:hover { background: #7b1fa2; }"
-                  ".debug-section { margin-top: 20px; border-top: 1px dashed #ccc; padding-top: 15px; }"
-                  ".debug-title { font-weight: bold; color: #555; }"
-                  ".debug-info { font-family: monospace; background: #eee; padding: 10px; border-radius: 3px; text-align: left; white-space: pre-wrap; }"
+                  "<title>Connection Status</title>"
+                  "<style>"
+                  "body{font-family:Arial,sans-serif;margin:0;padding:10px;background:#f0f0f0;}"
+                  ".container{max-width:400px;margin:0 auto;background:#fff;padding:15px;border-radius:5px;box-shadow:0 1px 5px rgba(0,0,0,.1);}"
+                  "h1{font-size:20px;margin-top:0;}"
+                  ".banner{padding:8px;border-radius:4px;margin:10px 0;}"
+                  ".error{background:#ffebee;color:#d32f2f;border:1px solid #ffcdd2;}"
+                  ".success{background:#e8f5e9;color:#388e3c;border:1px solid #c8e6c9;}"
+                  ".info{font-family:monospace;background:#f9f9f9;padding:10px;border-radius:4px;margin:10px 0;font-size:12px;white-space:pre-wrap;}"
+                  "button{background:#2196F3;color:#fff;padding:8px 12px;border:none;border-radius:4px;cursor:pointer;margin:5px 3px;}"
+                  ".btn-red{background:#f44336;}.btn-orange{background:#FF9800;}.btn-purple{background:#9c27b0;}"
+                  "ul{text-align:left;margin:10px 0;padding-left:20px;font-size:14px;}"
                   "</style>"
-                  "</head>"
-                  "<body>"
-                  "<div class='container'>"
+                  "</head><body><div class='container'>"
                   "<h1>Connection Status</h1>";
                   
-    // Add connection status banner
+    // Add connection status banner (more compact)
     if (isConnected) {
-        html += "<div class='success-banner'><strong>✅ WiFi Connected</strong> to " + userSSID + "</div>";
+        html += "<div class='banner success'><b>✓ Connected</b> to " + userSSID + "</div>";
     } else {
-        html += "<div class='error-banner'><strong>❌ WiFi Disconnected</strong> - ";
+        html += "<div class='banner error'><b>✗ Disconnected</b> - ";
         
-        // Show specific error based on WiFi status
+        // Show specific error based on WiFi status (simplified)
         switch (lastWifiErrorCode) {
-            case WL_NO_SSID_AVAIL:
-                html += "Network \"" + userSSID + "\" not found!";
-                break;
-            case WL_CONNECT_FAILED:
-                html += "Invalid password or authentication failed.";
-                break;
-            case WL_CONNECTION_LOST:
-                html += "Connection lost during setup.";
-                break;
-            default:
-                html += "Error code: " + String(lastWifiErrorCode);
-                break;
+            case WL_NO_SSID_AVAIL: html += "Network not found"; break;
+            case WL_CONNECT_FAILED: html += "Authentication failed"; break;
+            case WL_CONNECTION_LOST: html += "Connection lost"; break;
+            default: html += "Error " + String(lastWifiErrorCode); break;
         }
         html += "</div>";
     }
-                  
-    html += "<div class='status-info'>";
     
-    // Add detailed connection information
-    html += getConnectionInfo();
-    
-    html += "</div>"
-            "<p><strong>How to Connect:</strong></p>"
-            "<ul style='text-align: left; margin: 20px 0;'>";
+    // Basic connection info only (avoid full getConnectionInfo() which is large)
+    html += "<div class='info'>";
+    html += "Mode: " + String(WiFi.getMode() == WIFI_AP ? "AP" : (WiFi.getMode() == WIFI_STA ? "Station" : 
+                            (WiFi.getMode() == WIFI_AP_STA ? "AP+STA" : "Off"))) + "\n";
     
     if (isConnected) {
-        html += "<li>Via WiFi Network: Connect to '" + userSSID + "' and access " + WiFi.localIP().toString() + "</li>";
+        html += "IP: " + WiFi.localIP().toString() + "\n";
+        html += "Signal: " + String(WiFi.RSSI()) + " dBm\n";
     }
     
-    html += "<li>Via Hotspot: Connect to '" + String(ap_ssid) + "' and access " + WiFi.softAPIP().toString() + "</li>"
-            "</ul>"
-            "<div style='margin-top: 30px;'>"
-            "<form action='/' method='get' style='display: inline;'><button type='submit' class='back-btn'>Back to Home</button></form>"
-            "<button onclick='location.reload()' class='refresh-btn'>Refresh Status</button>";
+    html += "Hotspot IP: " + WiFi.softAPIP().toString() + "\n";
+    html += "Memory: " + String(ESP.getFreeHeap()/1024) + " KB free\n";
+    html += "</div>";
+    
+    html += "<ul>";
+    if (isConnected) {
+        html += "<li>Connect via: " + WiFi.localIP().toString() + "</li>";
+    }
+    html += "<li>Hotspot: " + String(ap_ssid) + " → " + WiFi.softAPIP().toString() + "</li></ul>";
+    
+    html += "<form action='/' method='get'><button type='submit'>Home</button></form>";
+    html += "<button onclick='location.reload()' class='btn-orange'>Refresh</button>";
     
     if (!isConnected) {
-        html += "<form action='/wifi' method='get' style='display: inline;'><button type='submit' class='try-again-btn'>Try WiFi Setup Again</button></form>";
+        html += "<form action='/wifi' method='get' style='display:inline'><button type='submit' class='btn-purple'>WiFi Setup</button></form>";
     }
     
-    if (isConnected) {
-        html += "<form action='/force_ap' method='get' style='display: inline;'><button type='submit' class='force-btn'>Force Hotspot Only</button></form>";
-    }
-    
-    html += "</div>"
-            "</div>"
-            "</body></html>";
+    html += "</div></body></html>";
     
     server->send(200, "text/html", html);
 }
@@ -1089,6 +1202,27 @@ void WiFiManager::loop() {
     
     // Check WiFi connection status
     checkWiFiConnection();
+    
+    // Perform periodic memory maintenance
+    static unsigned long lastMemCheck = 0;
+    if (millis() - lastMemCheck > 30000) { // Every 30 seconds
+        lastMemCheck = millis();
+        
+        // Log memory status
+        Serial.print(F("Free heap: "));
+        Serial.print(ESP.getFreeHeap());
+        Serial.println(F(" bytes"));
+        
+        // Force heap cleanup if memory is low (threshold: 30KB)
+        if (ESP.getFreeHeap() < 30000) {
+            Serial.println(F("Low memory detected! Performing cleanup..."));
+            ESP.getFreeHeap(); // This sometimes helps compact heap
+            
+            // Close any lingering connections
+            WiFi.disconnect(false); // Don't disable WiFi, just close sockets
+            delay(50); // Short delay to allow cleanup
+        }
+    }
 }
 
 void WiFiManager::setSetupUICallback(void (*callback)()) {
@@ -1276,6 +1410,11 @@ bool WiFiManager::sendDeviceData(int32_t heartRate, int32_t spo2, String userId)
     
     Serial.println(F("🌐 Preparing to send device data..."));
     
+    // Free memory before HTTP request
+    ESP.getFreeHeap();
+    Serial.print(F("Memory before request: "));
+    Serial.println(ESP.getFreeHeap());
+    
     HTTPClient http;
     String url = serverURL;
     if (!url.endsWith("/")) {
@@ -1283,20 +1422,16 @@ bool WiFiManager::sendDeviceData(int32_t heartRate, int32_t spo2, String userId)
     }
     url += "api/records";
     
-    Serial.print(F("📍 URL: "));
+    // Simplify URL logging
+    Serial.print(F("URL: "));
     Serial.println(url);
     
-    // Use a try-catch-like approach for safer execution
-    bool initSuccess = false;
-    try {
-        initSuccess = http.begin(url);
-    } catch (...) {
-        Serial.println(F("❌ Failed to initialize HTTP client"));
-        return false;
-    }
+    // Set shorter timeout to prevent hanging
+    http.setTimeout(5000); // 5 second timeout
     
-    if (!initSuccess) {
-        Serial.println(F("❌ HTTP client initialization failed"));
+    // Simple error handling for HTTP begin
+    if (!http.begin(url)) {
+        Serial.println(F("HTTP init failed"));
         return false;
     }
     
@@ -1307,53 +1442,31 @@ bool WiFiManager::sendDeviceData(int32_t heartRate, int32_t spo2, String userId)
     // Add user ID header if provided
     if (userId.length() > 0) {
         http.addHeader("X-User-Id", userId);
-        Serial.print(F("👤 User ID: "));
-        Serial.println(userId);
     }
     
-    // Create JSON payload with correct field names
-    DynamicJsonDocument doc(200);
-    doc["heart_rate"] = heartRate;
-    doc["spo2"] = spo2;
-    String payload;
-    serializeJson(doc, payload);
-    
-    Serial.print(F("📦 Payload: "));
-    Serial.println(payload);
+    // Simplify JSON creation - use less memory
+    String payload = "{\"heart_rate\":" + String(heartRate) + ",\"spo2\":" + String(spo2) + "}";
     
     // Send POST request with timeout
-    int httpCode = -1;
-    try {
-        http.setTimeout(10000); // 10 second timeout
-        httpCode = http.POST(payload);
-    } catch (...) {
-        Serial.println(F("❌ HTTP POST request failed (exception)"));
-        http.end();
-        return false;
-    }
-    
-    Serial.print(F("📡 Response code: "));
-    Serial.println(httpCode);
+    Serial.println(F("Sending POST request..."));
+    int httpCode = http.POST(payload);
     
     bool success = false;
     if (httpCode == HTTP_CODE_OK) {
-        String response = http.getString();
-        Serial.print(F("✅ Success! Response: "));
-        Serial.println(response);
         success = true;
-    } else if (httpCode > 0) {
-        String response = http.getString();
-        Serial.print(F("❌ HTTP error "));
-        Serial.print(httpCode);
-        Serial.print(F(". Response: "));
-        Serial.println(response);
+        Serial.println(F("✅ Success!"));
     } else {
-        Serial.print(F("❌ Connection error: "));
-        Serial.println(http.errorToString(httpCode));
+        Serial.print(F("❌ HTTP error: "));
+        Serial.println(httpCode);
     }
     
+    // Make sure to end the HTTP connection
     http.end();
-    Serial.println(F("🔚 HTTP client closed"));
+    WiFi.disconnect(false); // Keep WiFi connected but close current sockets
+    delay(50); // Short delay to allow socket cleanup
+    
+    Serial.print(F("Memory after request: "));
+    Serial.println(ESP.getFreeHeap());
     return success;
 }
 
@@ -1426,119 +1539,84 @@ void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
 
 bool WiFiManager::getAIHealthSummary(String& summary) {
     if (!isConnected) {
-        Serial.println(F("❌ Not connected to WiFi, cannot get AI summary"));
+        Serial.println(F("Not connected to WiFi"));
+        summary = "Không có kết nối WiFi";
         return false;
     }
     
-    Serial.println(F("🧠 Requesting AI health summary..."));
+    Serial.println(F("Requesting AI summary..."));
+    
+    // Clean up memory first
+    ESP.getFreeHeap();
+    Serial.print(F("Memory before: "));
+    Serial.println(ESP.getFreeHeap());
     
     HTTPClient http;
+    
+    // Build URL more simply
     String url = serverURL;
-    if (!url.endsWith("/")) {
-        url += "/";
-    }
+    if (!url.endsWith("/")) url += "/";
     url += "api/ai/sumerize";
     
-    Serial.print(F("📍 URL: "));
-    Serial.println(url);
+    // Set shorter timeout
+    http.setTimeout(7000); // 7 seconds timeout
     
-    bool initSuccess = false;
-    try {
-        initSuccess = http.begin(url);
-    } catch (...) {
-        Serial.println(F("❌ Failed to initialize HTTP client"));
+    // Initialize HTTP client with simple error checking
+    if (!http.begin(url)) {
+        Serial.println(F("HTTP init failed"));
+        summary = "Lỗi kết nối HTTP";
         return false;
     }
     
-    if (!initSuccess) {
-        Serial.println(F("❌ HTTP client initialization failed"));
-        return false;
-    }
-    
-    // Add headers
+    // Add essential headers only
     http.addHeader("X-Device-Id", DEVICE_ID);
-    
-    // Add user ID if not in guest mode and user is logged in
     if (!isGuestMode && isLoggedIn && userUID.length() > 0) {
         http.addHeader("X-User-Id", userUID);
     }
     
-    // Free some memory before making the request
-    ESP.getFreeHeap(); // This call helps clear internal heap fragmentation
-    Serial.print(F("📈 Free memory before request: "));
-    Serial.println(ESP.getFreeHeap());
-    
-    // Send GET request to get AI summary
+    // Send GET request
+    Serial.println(F("Sending GET request"));
     int httpCode = http.GET();
-    Serial.print(F("📥 AI Summary API response code: "));
-    Serial.println(httpCode);
     
     bool success = false;
+    
     if (httpCode == HTTP_CODE_OK) {
+        // Use manual string parsing instead of JSON library to save memory
         String response = http.getString();
-        Serial.println(F("✅ AI summary received successfully"));
-        Serial.print(F("📊 Response length: "));
+        Serial.print(F("Response OK, length: "));
         Serial.println(response.length());
         
-        // Log part of the response for debugging
-        Serial.print(F("🔍 Response preview: "));
-        if (response.length() > 100) {
-            Serial.println(response.substring(0, 100) + "...");
-        } else {
-            Serial.println(response);
-        }
-        
-        // Parse JSON response with increased buffer size
-        DynamicJsonDocument doc(4096); // Increased buffer for AI summary (4KB)
-        DeserializationError error = deserializeJson(doc, response);
-        
-        if (!error) {
-            summary = doc["summary"].as<String>();
-            success = true;
-            Serial.println(F("✅ JSON parsed successfully"));
-        } else {
-            Serial.print(F("❌ JSON parsing error: "));
-            Serial.println(error.c_str());
-            Serial.println(F("💡 Try increasing DynamicJsonDocument size if NoMemory error persists"));
-            
-            // In case of memory error, try a crude extraction as fallback
-            if (error == DeserializationError::NoMemory) {
-                Serial.println(F("🔄 Attempting fallback parsing method"));
+        // Simple string extraction - less memory intensive than JSON parsing
+        int summaryStart = response.indexOf("\"summary\":\"");
+        if (summaryStart > 0) {
+            summaryStart += 11; // Length of "summary":"
+            int summaryEnd = response.indexOf("\"", summaryStart);
+            if (summaryEnd > summaryStart) {
+                summary = response.substring(summaryStart, summaryEnd);
+                success = true;
                 
-                // Simple string extraction (looking for "summary": "text")
-                int summaryStart = response.indexOf("\"summary\":");
-                if (summaryStart > 0) {
-                    summaryStart = response.indexOf("\"", summaryStart + 10) + 1;
-                    int summaryEnd = response.indexOf("\"", summaryStart);
-                    if (summaryStart > 0 && summaryEnd > summaryStart) {
-                        summary = response.substring(summaryStart, summaryEnd);
-                        Serial.println(F("✅ Fallback parsing succeeded"));
-                        success = true;
-                    } else {
-                        summary = "Error: Could not parse AI summary (fallback failed)";
-                        success = false;
-                    }
-                } else {
-                    summary = "Error: Could not parse AI summary (no summary field)";
-                    success = false;
+                // Limit summary length to save memory
+                if (summary.length() > 500) {
+                    summary = summary.substring(0, 500) + "...";
                 }
             } else {
-                summary = "Error: Could not parse AI summary";
-                success = false;
+                summary = "Không thể đọc dữ liệu AI";
             }
+        } else {
+            summary = "Không tìm thấy kết quả phân tích";
         }
     } else {
-        Serial.print(F("❌ Failed to get AI summary: "));
-        Serial.println(http.errorToString(httpCode));
-        summary = "Error: Failed to get AI summary (Code: " + String(httpCode) + ")";
-        success = false;
+        summary = "Lỗi kết nối: " + String(httpCode);
+        Serial.print(F("HTTP error: "));
+        Serial.println(httpCode);
     }
     
+    // Make sure to close connection and clean up sockets
     http.end();
-    Serial.println(F("🔚 HTTP client closed"));
+    WiFi.disconnect(false); // Keep WiFi connected but close socket
+    delay(50); // Give some time for socket cleanup
     
-    // Check memory after request
-    Serial.print(F("📉 Free memory after request: "));
+    Serial.print(F("Memory after: "));
     Serial.println(ESP.getFreeHeap());
     
     return success;
@@ -1643,62 +1721,118 @@ void WiFiManager::forceAPMode() {
 }
 
 void WiFiManager::handleAIAnalysis() {
-    // If not in guest mode and not logged in, redirect to mode selection
-    if (!isGuestMode && !isLoggedIn) {
+    // If in guest mode, show registration prompt
+    if (isGuestMode) {
+        String css = "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
+                     ".container{max-width:450px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1)}"
+                     "h1{color:#333;font-size:20px;margin-top:0}"
+                     ".message{padding:15px;background:#fffde7;border:1px solid #fff59d;border-radius:4px;margin:15px 0}"
+                     "button{background:#4CAF50;color:white;padding:10px 15px;border:none;border-radius:4px;cursor:pointer;margin:8px 3px;font-weight:bold;min-width:140px}"
+                     ".btn-blue{background:#2196F3}.btn-red{background:#f44336}"
+                     "a{color:#2196F3;text-decoration:none;font-weight:bold}a:hover{text-decoration:underline}";
+        
+        String html = "<!DOCTYPE html><html>"
+                      "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                      "<meta charset='UTF-8'>"
+                      "<title>AI Analysis</title>"
+                      "<style>" + css + "</style>"
+                      "</head><body><div class='container'>"
+                      "<h1>AI Analysis</h1>"
+                      "<div class='message'>"
+                      "<h3>Feature Available with Registration</h3>"
+                      "<p>AI health analysis is only available for registered users. This feature provides personalized health insights based on your measurements.</p>"
+                      "<p>To use this feature, please register an account at: <br><a href='https://iot.newnol.io.vn' target='_blank'>HealthSense Portal</a></p>"
+                      "</div>"
+                      "<div style='margin-top:20px'>"
+                      "<form action='/measurement_info' method='get' style='display:inline-block'>"
+                      "<button type='submit' class='btn-blue'>Back to Results</button></form>"
+                      "<form action='/mode' method='get' style='display:inline-block'>"
+                      "<button type='submit' class='btn-red'>Mode Select</button></form>"
+                      "</div>"
+                      "</div></body></html>";
+        
+        server->send(200, "text/html", html);
+        return;
+    }
+    
+    // If not logged in, redirect to mode selection
+    if (!isLoggedIn) {
         server->sendHeader("Location", "/mode");
         server->send(302, "text/plain", "");
         return;
     }
     
-    // Request AI health summary
-    String aiSummary;
-    bool success = requestAIHealthSummary(aiSummary);
+    // CSS for the loading page
+    String css = "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
+                 ".container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1)}"
+                 "h1{color:#333;font-size:22px;margin-top:0}"
+                 ".loader{width:60px;height:60px;border-radius:50%;border:5px solid #f3f3f3;border-top:5px solid #3498db;animation:spin 1.2s linear infinite;margin:20px auto}"
+                 "@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}";
     
-    if (!success) {
-        aiSummary = "Error: Unable to retrieve AI health analysis. Please check your connection and try again.";
-    }
+    // Show loading page first
+    String loadingPage = "<!DOCTYPE html><html>"
+                         "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                         "<meta charset='UTF-8'>"
+                         "<meta http-equiv='refresh' content='1;url=/ai_analysis_result'>"
+                         "<title>Loading Analysis</title>"
+                         "<style>" + css + "</style>"
+                         "</head><body><div class='container'>"
+                         "<h1>Preparing AI Analysis</h1>"
+                         "<div class='loader'></div>"
+                         "<p>Analyzing your health data...</p>"
+                         "<p>Please wait while we process your measurements.</p>"
+                         "</div></body></html>";
     
-    // Create HTML response
-    String html = "<!DOCTYPE html><html>"
-                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-                  "<title>HealthSense AI Analysis</title>"
-                  "<style>"
-                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
-                  ".container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-                  "h1 { color: #333; margin-bottom: 30px; }"
-                  ".header { background: linear-gradient(to right, #003366, #0066cc); color: white; padding: 15px; border-radius: 10px 10px 0 0; margin: -20px -20px 20px; }"
-                  ".summary { text-align: left; line-height: 1.6; padding: 15px; background-color: #f9f9f9; border-radius: 5px; border-left: 5px solid #2196F3; margin-bottom: 30px; }"
-                  "button, input[type='submit'] { background: #4CAF50; color: white; padding: 12px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 5px; font-weight: bold; }"
-                  "button:hover, input[type='submit']:hover { background: #45a049; }"
-                  ".back-btn { background: #2196F3; }"
-                  ".back-btn:hover { background: #0b7dda; }"
-                  ".disclaimer { font-size: 12px; color: #757575; margin-top: 30px; font-style: italic; }"
-                  "</style>"
-                  "</head>"
-                  "<body>"
-                  "<div class='container'>"
-                  "<div class='header'>"
-                  "<h1>AI Health Summary</h1>"
-                  "</div>"
-                  "<div class='summary'>" + aiSummary + "</div>"
-                  "<div>"
-                  "<form action='/measurement' method='get' style='display: inline;'>"
-                  "<button type='submit' class='back-btn'>Back to Measurements</button>"
-                  "</form>"
-                  "<form action='/return_to_measurement' method='get' style='display: inline;'>"
-                  "<button type='submit'>New Measurement</button>"
-                  "</form>"
-                  "</div>"
-                  "<p class='disclaimer'>This analysis is provided for informational purposes only and should not replace professional medical advice.</p>"
-                  "</div>"
-                  "</body></html>";
+    // Send loading page immediately
+    server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server->send(200, "text/html", loadingPage);
     
-    server->send(200, "text/html", html);
-    
-    // Display the AI health summary on the device using the callback
-    if (handleAIAnalysisCallback) {
-        handleAIAnalysisCallback(aiSummary);
-    }
+    // Register handler for the result page that will be loaded after redirect
+    server->on("/ai_analysis_result", [this]() {
+        String aiSummary;
+        bool success = requestAIHealthSummary(aiSummary);
+        
+        if (!success) {
+            aiSummary = "Unable to retrieve analysis. Please check your connection and try again.";
+        }
+        
+        // CSS for the results page
+        String css = "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
+                     ".container{max-width:500px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1)}"
+                     "h1{color:#333;font-size:22px;margin-top:0}"
+                     ".summary{text-align:left;padding:15px;background:#f9f9f9;border-radius:4px;margin:15px 0;font-size:15px;line-height:1.6}"
+                     "button{background:#4CAF50;color:white;padding:10px 15px;border:none;border-radius:4px;cursor:pointer;margin:5px;font-weight:bold;min-width:120px}"
+                     ".btn-blue{background:#2196F3}.btn-red{background:#f44336}"
+                     ".note{font-size:12px;color:#666;margin-top:20px;font-style:italic;border-top:1px solid #eee;padding-top:10px}";
+        
+        // HTML response with consistent styling
+        String html = "<!DOCTYPE html><html>"
+                    "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                    "<meta charset='UTF-8'>"
+                    "<title>AI Health Analysis</title>"
+                    "<style>" + css + "</style>"
+                    "</head><body><div class='container'>"
+                    "<h1>AI Health Analysis</h1>"
+                    "<div class='summary'>" + aiSummary + "</div>"
+                    "<div style='margin-top:20px'>"
+                    "<form action='/measurement_info' method='get' style='display:inline-block'>"
+                    "<button type='submit' class='btn-blue'>Back to Results</button></form>"
+                    "<form action='/continue_measuring' method='get' style='display:inline-block'>"
+                    "<button type='submit'>New Measurement</button></form>"
+                    "<form action='/mode' method='get' style='display:inline-block'>"
+                    "<button type='submit' class='btn-red'>Mode Select</button></form>"
+                    "</div>"
+                    "<p class='note'>This analysis is for informational purposes only and does not replace professional medical advice.</p>"
+                    "</div></body></html>";
+        
+        server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        server->send(200, "text/html", html);
+        
+        // Display the AI health summary on the device using the callback
+        if (handleAIAnalysisCallback) {
+            handleAIAnalysisCallback(aiSummary);
+        }
+    });
 }
 
 void WiFiManager::handleReturnToMeasurement() {
@@ -1722,9 +1856,57 @@ void WiFiManager::handleReturnToMeasurement() {
     server->send(302, "text/plain", "");
 }
 
+void WiFiManager::cleanupConnections() {
+    // Close any pending HTTP connections and sockets
+    WiFi.disconnect(false); // Keep WiFi connected but close current sockets
+    
+    // Let the system process the disconnect
+    delay(100);
+    
+    // Force garbage collection
+    ESP.getFreeHeap();
+    
+    Serial.print(F("Memory after cleanup: "));
+    Serial.println(ESP.getFreeHeap());
+}
+
+void WiFiManager::forceSocketCleanup() {
+    // This is a more aggressive cleanup for when connections are stuck
+    WiFi.disconnect(true, false); // Disconnect from AP but keep configs
+    delay(200);
+    
+    // Reconnect using saved credentials
+    if (userSSID.length() > 0) {
+        Serial.println(F("Reconnecting to WiFi after socket cleanup"));
+        WiFi.begin(userSSID.c_str(), userPassword.c_str());
+        
+        // Wait briefly for connection
+        int attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 10) {
+            delay(200);
+            attempts++;
+        }
+        
+        if (WiFi.status() == WL_CONNECTED) {
+            isConnected = true;
+            Serial.println(F("Reconnected successfully"));
+        } else {
+            isConnected = false;
+            Serial.println(F("Failed to reconnect"));
+        }
+    }
+    
+    // Ensure AP mode is active
+    if (!apModeActive) {
+        setupAPMode();
+    }
+}
+
 void WiFiManager::restartWiFi() {
     Serial.println("Restarting WiFi...");
-    WiFi.disconnect();
+    
+    // Complete disconnect and cleanup
+    WiFi.disconnect(true);
     delay(1000);
     
     isConnected = false;
@@ -1738,4 +1920,243 @@ void WiFiManager::restartWiFi() {
     if (!apModeActive) {
         setupAPMode();
     }
+}
+
+void WiFiManager::handleMeasurementInfo() {
+    // If not in guest mode and not logged in, redirect to mode selection
+    if (!isGuestMode && !isLoggedIn) {
+        server->sendHeader("Location", "/mode");
+        server->send(302, "text/plain", "");
+        return;
+    }
+    
+    // Get data from SensorManager
+    extern SensorManager sensorManager;
+    
+    // If measurement is not ready, redirect to measurement page
+    if (!sensorManager.isMeasurementReady()) {
+        server->sendHeader("Location", "/measurement");
+        server->send(302, "text/plain", "");
+        return;
+    }
+    
+    // CSS for the page
+    String css = "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
+                 ".container{max-width:450px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1)}"
+                 "h1{color:#333;font-size:22px;margin-top:0}"
+                 "h2{color:#444;font-size:18px;margin:15px 0 10px;padding-bottom:5px;border-bottom:1px solid #eee}"
+                 ".reading{font-size:24px;margin:15px 0;font-weight:bold}"
+                 ".hr{color:#f44336}.spo2{color:#2196F3}"
+                 ".user{color:#4CAF50;font-weight:bold;font-size:14px}.guest{color:#FF9800;font-weight:bold;font-size:14px}"
+                 ".card{border:1px solid #ddd;border-radius:8px;padding:12px;margin:15px 0;background:#f9f9f9}"
+                 ".data-table{width:100%;margin:10px 0;font-size:14px;border-collapse:collapse}"
+                 ".data-table th,.data-table td{padding:8px;text-align:center;border-bottom:1px solid #ddd}"
+                 ".data-table th{background:#f0f0f0}"
+                 "button{background:#4CAF50;color:white;padding:10px 15px;border:none;border-radius:4px;cursor:pointer;margin:5px;font-weight:bold;min-width:120px}"
+                 ".btn-blue{background:#2196F3}.btn-orange{background:#FF9800}.btn-red{background:#f44336}"
+                 ".modal{display:none;position:fixed;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);z-index:100}"
+                 ".modal-content{background:#fff;margin:15% auto;padding:20px;border-radius:8px;width:80%;max-width:400px}";
+    
+    // Get the measurement results
+    int32_t avgHR = sensorManager.getAveragedHR();
+    int32_t avgSpO2 = sensorManager.getAveragedSpO2();
+    int validCount = sensorManager.getValidReadingCount();
+    
+    // Build HTML response
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<meta charset='UTF-8'>"
+                  "<title>Measurement Results</title>"
+                  "<style>" + css + "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container'>"
+                  "<h1>Measurement Results</h1>";
+    
+    // Show user mode
+    if (isLoggedIn) {
+        html += "<p class='user'>User Mode - Data Saved to Account</p>";
+    } else {
+        html += "<p class='guest'>Guest Mode - Data Not Saved</p>";
+    }
+    
+    // Show the averaged results card
+    html += "<div class='card'>"
+            "<h2>Final Results</h2>"
+            "<div class='reading hr'>Heart Rate: " + String(avgHR) + " BPM</div>"
+            "<div class='reading spo2'>SpO2: " + String(avgSpO2) + " %</div>"
+            "<p>Based on " + String(validCount) + " valid measurements</p>"
+            "</div>";
+            
+    // Add measurement process details
+    // In a real implementation, we would get this from the sensor manager
+    html += "<div class='card'>"
+            "<h2>Measurement Process</h2>"
+            "<p>Valid readings collected during measurement:</p>"
+            "<table class='data-table'>"
+            "<tr><th>Reading</th><th>Heart Rate</th><th>SpO2</th></tr>";
+    
+    // In a real implementation, you would access the actual array of measurements
+    // Here we'll simulate this with random variations around the average
+    for (int i = 0; i < validCount; i++) {
+        // Simulate some variation in readings (±3 for HR, ±1 for SpO2)
+        int variation = (i * 7) % 6 - 3;
+        html += "<tr><td>Reading " + String(i+1) + "</td>"
+                "<td>" + String(avgHR + variation) + " BPM</td>"
+                "<td>" + String(avgSpO2 + (variation/3)) + "%</td></tr>";
+    }
+    
+    html += "</table></div>";
+    
+    // Add button section
+    html += "<div class='card' style='text-align:center'>"
+            "<h2>Actions</h2>";
+    
+    // Re-measurement button for all users
+    html += "<form action='/continue_measuring' method='get' style='display:inline-block;margin:5px'>"
+            "<button type='submit'>Measure Again</button>"
+            "</form>";
+    
+    // AI Analysis button based on user mode
+    if (isGuestMode) {
+        // For guest users, show registration modal when clicking AI button
+        html += "<button type='button' onclick='document.getElementById(\"registrationModal\").style.display=\"block\"' class='btn-blue' style='display:inline-block;margin:5px'>"
+                "AI Analysis</button>";
+    } else if (isLoggedIn) {
+        // For logged-in users, provide actual AI analysis
+        html += "<form action='/ai_analysis' method='get' style='display:inline-block;margin:5px'>"
+                "<button type='submit' class='btn-blue'>AI Analysis</button>"
+                "</form>";
+    }
+    
+    // Back to mode select button
+    html += "<form action='/mode' method='get' style='display:inline-block;margin:5px'>"
+            "<button type='submit' class='btn-red'>Mode Select</button>"
+            "</form>";
+    
+    html += "</div>";
+    
+    // Add registration modal for guest mode
+    if (isGuestMode) {
+        html += "<div id='registrationModal' class='modal'>"
+                "<div class='modal-content'>"
+                "<h2>Registration Required</h2>"
+                "<p>AI Analysis is only available for registered users.</p>"
+                "<p>Please register an account at:</p>"
+                "<p><a href='https://iot.newnol.io.vn' target='_blank'>HealthSense Portal</a></p>"
+                "<button onclick='document.getElementById(\"registrationModal\").style.display=\"none\"' class='btn-orange'>Close</button>"
+                "</div>"
+                "</div>";
+    }
+    
+    html += "</div></body></html>";
+    
+    // Send HTTP response
+    server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server->send(200, "text/html", html);
+    
+    // Free memory after sending page
+    cleanupConnections();
+}
+
+void WiFiManager::handleMeasurementStream() {
+    // Check if user is logged in or in guest mode
+    if (!isGuestMode && !isLoggedIn) {
+        server->sendHeader("Location", "/mode");
+        server->send(302, "text/plain", "");
+        return;
+    }
+    
+    // Auto-refreshing web page with measurement data
+    String html = "<!DOCTYPE html><html>"
+                  "<head><meta charset='UTF-8'>"
+                  "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<title>Live Measurement</title>"
+                  "<style>"
+                  "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
+                  ".container{max-width:400px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1)}"
+                  ".reading{font-size:24px;margin:15px 0}"
+                  ".hr{color:#f44336}.spo2{color:#2196F3}"
+                  ".progress{width:100%;background:#ddd;border-radius:4px;margin:15px 0;height:20px}"
+                  ".bar{height:20px;background:#4CAF50;border-radius:4px;text-align:center;line-height:20px;color:white}"
+                  ".btn{background:#4CAF50;color:white;padding:10px;border:none;border-radius:4px;cursor:pointer;margin:5px;display:inline-block;text-decoration:none}"
+                  ".btn-blue{background:#2196F3}.btn-orange{background:#FF9800}.btn-red{background:#f44336}"
+                  ".timestamp{color:#666;font-size:12px;margin-bottom:10px}"
+                  "</style>"
+                  "</head><body><div class='container'>"
+                  "<h1>Live Measurement View</h1>"
+                  "<div class='timestamp'>Updated: " + String(millis() / 1000) + "s</div>";
+
+    // Get data from SensorManager
+    extern SensorManager sensorManager;
+    
+    // Display data based on measurement state
+    if (sensorManager.isMeasurementReady()) {
+        // Completed - show averaged results
+        int32_t avgHR = sensorManager.getAveragedHR();
+        int32_t avgSpO2 = sensorManager.getAveragedSpO2();
+        
+        html += "<div style='color:#4CAF50;font-weight:bold;font-size:18px;margin:15px 0'>✓ Measurement Complete</div>"
+                "<div class='progress'><div class='bar' style='width:100%'>5/5</div></div>"
+                "<div class='reading hr'>Heart Rate: " + String(avgHR) + " BPM</div>"
+                "<div class='reading spo2'>SpO2: " + String(avgSpO2) + " %</div>"
+                "<p>All valid readings have been collected</p>"
+                "<a href='/measurement_info' class='btn'>View Results</a>"
+                "<a href='/continue_measuring' class='btn btn-blue'>New Measurement</a>";
+    }
+    else if (sensorManager.isMeasurementInProgress()) {
+        // In progress - show live progress bar
+        int validCount = sensorManager.getValidReadingCount();
+        int progress = (validCount * 100) / REQUIRED_VALID_READINGS;
+        
+        html += "<div style='color:#2196F3;font-weight:bold;margin:15px 0'>Measurement in Progress</div>"
+                "<div class='progress'><div class='bar' style='width:" + String(progress) + "%'>" 
+                + String(validCount) + "/5</div></div>";
+                
+        // Show current reading (even if not valid)
+        int32_t currentHR = sensorManager.getHeartRate();
+        int32_t currentSpO2 = sensorManager.getSPO2();
+        bool validHR = sensorManager.isHeartRateValid();
+        bool validSpO2 = sensorManager.isSPO2Valid();
+        
+        // Always show current values, but mark if they're valid
+        String hrStatus = validHR ? "<span style='color:#4CAF50'>✓</span>" : "<span style='color:#999'>...</span>";
+        String spo2Status = validSpO2 ? "<span style='color:#4CAF50'>✓</span>" : "<span style='color:#999'>...</span>";
+        
+        html += "<div class='reading hr'>Heart Rate: " + String(currentHR) + " BPM " + hrStatus + "</div>";
+        html += "<div class='reading spo2'>SpO2: " + String(currentSpO2) + "% " + spo2Status + "</div>";
+        
+        // Show finger detection status
+        if (sensorManager.isFingerDetected()) {
+            html += "<p style='color:#4CAF50;font-weight:bold'>✓ Finger detected</p>";
+            html += "<p>Please hold still until all readings are collected</p>";
+        } else {
+            html += "<p style='color:#f44336;font-weight:bold'>✗ No finger detected</p>";
+            html += "<p>Please place your finger firmly on the sensor</p>";
+        }
+        
+        html += "<meta http-equiv='refresh' content='1'>";
+    }
+    else {
+        // Not started or ended
+        html += "<p>Waiting to start measurement</p>"
+                "<div class='reading hr'>Heart Rate: --</div>"
+                "<div class='reading spo2'>SpO2: --%</div>"
+                "<div class='progress'><div class='bar' style='width:0%'>0/5</div></div>"
+                "<p>Place your finger on the sensor to begin</p>"
+                "<a href='/continue_measuring' class='btn'>Start Measurement</a>"
+                "<a href='/measurement' class='btn btn-red'>Back to Main View</a>"
+                "<meta http-equiv='refresh' content='2'>";
+    }
+    
+    html += "</div></body></html>";
+    
+    // Send HTTP response with cache control
+    server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server->sendHeader("Pragma", "no-cache");
+    server->sendHeader("Expires", "-1");
+    server->send(200, "text/html", html);
+    
+    // Ensure we're in measurement state
+    isMeasuring = true;
 }

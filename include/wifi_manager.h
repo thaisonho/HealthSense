@@ -53,6 +53,8 @@ private:
     void handleLoginSubmit();
     void handleGuest();
     void handleMeasurement();
+    void handleMeasurementInfo();
+    void handleMeasurementStream(); // Thêm handler mới cho stream kết quả đo
     void handleContinueMeasuring();
     void handleReconfigWiFi();
     void handleStatus();
@@ -109,6 +111,8 @@ public:
     // Utility functions
     void forceAPMode();
     void restartWiFi();
+    void cleanupConnections();
+    void forceSocketCleanup();
 };
 
 #endif // WIFI_MANAGER_H
