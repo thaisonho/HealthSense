@@ -1,4 +1,5 @@
 #include "sensor_manager.h"
+#include "display_manager.h" // Include the DisplayManager header
 
 SensorManager::SensorManager(int bufferSize) : 
     bufferLength(bufferSize),
@@ -250,7 +251,23 @@ void SensorManager::processReadings() {
     }
     
     // After gathering 25 new samples recalculate HR and SP02
+    int32_t originalSpo2 = spo2;
     maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+    
+    // Debug the SpO2 value
+    Serial.print(F("📊 Original SpO2: "));
+    Serial.print(originalSpo2);
+    Serial.print(F(" → New SpO2: "));
+    Serial.println(spo2);
+    
+    // Make sure SpO2 is positive - use absolute value
+    if (spo2 < 0) {
+        Serial.print(F("⚠️ Negative SpO2 detected: "));
+        Serial.print(spo2);
+        Serial.print(F(" → Converting to positive: "));
+        spo2 = abs(spo2);
+        Serial.println(spo2);
+    }
     
     // Check if a finger is actually detected BEFORE we validate any readings
     bool fingerPresent = isFingerDetected();
@@ -326,7 +343,7 @@ void SensorManager::processReadings() {
         // Only add reading if both HR and SpO2 are valid AND finger is detected
         if (validHeartRate && validSPO2 && isFingerDetected()) {
             validReadings[validReadingCount][0] = heartRate;
-            validReadings[validReadingCount][1] = spo2;
+            validReadings[validReadingCount][1] = abs(spo2); // Use abs to ensure positive value
             validReadingCount++;
             
             Serial.print(F("✓ Valid reading "));
@@ -353,7 +370,7 @@ void SensorManager::processReadings() {
                 }
                 
                 averagedHR = totalHR / REQUIRED_VALID_READINGS;
-                averagedSpO2 = totalSpO2 / REQUIRED_VALID_READINGS;
+                averagedSpO2 = abs(totalSpO2 / REQUIRED_VALID_READINGS); // Use abs to ensure positive value
                 measurementComplete = true;
                 isMeasuring = false;
                 

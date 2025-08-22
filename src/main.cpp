@@ -56,6 +56,11 @@ void setup() {
   wifiManager.setStartNewMeasurementCallback([]() {
     Serial.println(F("Starting new measurement from web interface..."));
     if (sensorManager.isReady()) {
+      // Clear screen first
+      display.clearScreen();
+      // Setup sensor UI after clearing
+      display.setupSensorUI();
+      // Start the measurement
       sensorManager.startMeasurement();
     }
   });
@@ -88,6 +93,11 @@ void setup() {
       Serial.print(sensorManager.isMeasurementInProgress() ? "YES" : "NO");
       Serial.print(F(", WiFi measurement active: "));
       Serial.println(wifiManager.isMeasurementActive() ? "YES" : "NO");
+      // Clear screen before starting measurement
+      display.clearScreen();
+      // Setup sensor UI after clearing
+      display.setupSensorUI();
+      // Start the measurement
       sensorManager.startMeasurement();
     } else if (fingerDetected && sensorManager.isMeasurementInProgress()) {
       Serial.println(F("👆 Finger detected but measurement already in progress"));
@@ -221,6 +231,11 @@ void loop() {
       if (wifiManager.isMeasurementActive() && !sensorManager.isMeasurementInProgress() && 
           !sensorManager.isMeasurementReady() && sensorManager.isReady()) {
         Serial.println(F("🔄 Main loop detected WiFi measurement flag set but sensor not measuring yet - starting sensor"));
+        // Clear screen before starting measurement
+        display.clearScreen();
+        // Setup sensor UI after clearing
+        display.setupSensorUI();
+        // Start the measurement
         sensorManager.startMeasurement();
       }
       

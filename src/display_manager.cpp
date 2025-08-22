@@ -192,9 +192,18 @@ void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32
     static int lastValidCount = 0;
     extern SensorManager sensorManager;  // Reference to the SensorManager instance
     
+    // Debug SpO2 value
+    if (validSPO2) {
+        Serial.print(F("📊 LCD Display - SpO2 value: "));
+        Serial.print(spo2);
+        Serial.print(F(" (abs: "));
+        Serial.print(abs(spo2));
+        Serial.println(F(")"));
+    }
+    
     // Clear previous readings
     tft->fillRect(75, 90, 80, 10, ST7735_BLACK);  // Clear heart rate value area
-    tft->fillRect(45, 110, 80, 10, ST7735_BLACK); // Clear SpO2 value area
+    tft->fillRect(40, 110, 85, 10, ST7735_BLACK); // Clear SpO2 value area with wider width
     
     // Clear status line if valid count changes
     if (lastValidCount != sensorManager.getValidReadingCount()) {
@@ -216,10 +225,15 @@ void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32
         tft->print(sensorManager.getAveragedHR());
         tft->print(" BPM");
         
-        // Display averaged SpO2
-        tft->setCursor(45, 110);
+        // Display averaged SpO2 - completely rewriting the SpO2 area
+        tft->fillRect(5, 110, 120, 10, ST7735_BLACK); // Clear entire SpO2 line
+        tft->setCursor(5, 110);
         tft->setTextColor(ST7735_BLUE);
-        tft->print(sensorManager.getAveragedSpO2());
+        tft->print("SpO2: ");
+        
+        // Force positive value
+        uint32_t positiveSpO2 = abs(sensorManager.getAveragedSpO2());
+        tft->print(positiveSpO2);
         tft->print(" %");
         
         // Show progress - complete message
@@ -257,12 +271,21 @@ void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32
         }
     }
     
-    // Display SpO2
-    tft->setCursor(45, 110);
+    // Display SpO2 - completely rewriting the SpO2 area
+    tft->fillRect(5, 110, 120, 10, ST7735_BLACK); // Clear entire SpO2 line
+    tft->setCursor(5, 110);
     tft->setTextColor(ST7735_BLUE);
+    tft->print("SpO2: ");
+    
     if (validSPO2) {
-        tft->print(spo2);
+        // Force positive value and format as SpO2: XX %
+        uint32_t positiveSpO2 = abs(spo2);
+        tft->print(positiveSpO2);
         tft->print(" %");
+        
+        // Debug output to verify
+        Serial.print(F("✓ SpO2 displayed as: "));
+        Serial.println(positiveSpO2);
     } else {
         tft->print("-- %");
     }
@@ -448,4 +471,17 @@ void DisplayManager::displayAIHealthSummary(const String& summary) {
     // Track memory usage for debugging
     Serial.print(F("💾 Free memory after display: "));
     Serial.println(ESP.getFreeHeap());
+}
+
+void DisplayManager::clearScreen() {
+    // Fill the entire screen with black color
+    tft->fillScreen(ST7735_BLACK);
+    
+    // Draw the logo at the top (if it was there before)
+    if (logo != nullptr) {
+        tft->drawRGBBitmap((160 - logoWidth)/2, 0, logo, logoWidth, logoHeight);
+    }
+    
+    // Log the action
+    Serial.println(F("📱 Screen cleared"));
 }

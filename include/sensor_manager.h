@@ -9,6 +9,9 @@
 #include "spo2_algorithm.h"
 #include "MAX30105.h"
 
+// Forward declaration of DisplayManager class
+class DisplayManager;
+
 // Constants for sensor configuration
 #define LED_BRIGHTNESS_DEFAULT 50      // Default brightness level (0-255)
 #define LED_BRIGHTNESS_LOW 0x1A        // Lower brightness to prevent saturation

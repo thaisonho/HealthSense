@@ -11,6 +11,9 @@
 #include <esp_wifi.h>
 #include "common_types.h"
 
+// Forward declaration of DisplayManager class
+class DisplayManager;
+
 
 class WiFiManager {
 private:

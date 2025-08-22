@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 #include "sensor_manager.h"
+#include "display_manager.h" // Include DisplayManager header
 #include <EEPROM.h>
 #include <esp_wifi.h>
 
@@ -668,11 +669,11 @@ void WiFiManager::handleConnect() {
                         "<p>IP: " + WiFi.localIP().toString() + "</p>";
                         
                 if (WiFi.RSSI() > -70) {
-                    html += "<p>Tín hiệu: Mạnh (" + String(WiFi.RSSI()) + " dBm)</p>";
+                    html += "<p>Tín hiệu: Mạnh (-" + String(abs(WiFi.RSSI())) + " dBm)</p>";
                 } else if (WiFi.RSSI() > -85) {
-                    html += "<p>Tín hiệu: Trung bình (" + String(WiFi.RSSI()) + " dBm)</p>";
+                    html += "<p>Tín hiệu: Trung bình (-" + String(abs(WiFi.RSSI())) + " dBm)</p>";
                 } else {
-                    html += "<p>Tín hiệu: Yếu (" + String(WiFi.RSSI()) + " dBm)</p>";
+                    html += "<p>Tín hiệu: Yếu (-" + String(abs(WiFi.RSSI())) + " dBm)</p>";
                 }
                 
                 html += "<form action='/mode'><button type='submit'>Tiếp tục</button></form>";
@@ -1055,7 +1056,8 @@ void WiFiManager::handleStatus() {
     
     if (isConnected) {
         html += "IP: " + WiFi.localIP().toString() + "\n";
-        html += "Signal: " + String(WiFi.RSSI()) + " dBm\n";
+        // RSSI should be negative, so use abs() but add negative sign explicitly
+        html += "Signal: -" + String(abs(WiFi.RSSI())) + " dBm\n";
     }
     
     html += "Hotspot IP: " + WiFi.softAPIP().toString() + "\n";
@@ -1408,7 +1410,7 @@ bool WiFiManager::sendDeviceData(int32_t heartRate, int32_t spo2, String userId)
     }
     
     // Simplify JSON creation - use less memory
-    String payload = "{\"heart_rate\":" + String(heartRate) + ",\"spo2\":" + String(spo2) + "}";
+    String payload = "{\"heart_rate\":" + String(heartRate) + ",\"spo2\":" + String(abs(spo2)) + "}";
     
     // Send POST request with timeout
     Serial.println(F("Sending POST request..."));
@@ -1637,7 +1639,7 @@ String WiFiManager::getConnectionInfo() const {
         info += "- Connected to: " + userSSID + "\n";
         info += "- Station IP: " + WiFi.localIP().toString() + "\n";
         info += "- MAC Address: " + WiFi.macAddress() + "\n";
-        info += "- Signal Strength: " + String(WiFi.RSSI()) + " dBm\n";
+        info += "- Signal Strength: -" + String(abs(WiFi.RSSI())) + " dBm\n";
         info += "- DNS Server: " + WiFi.dnsIP().toString() + "\n";
     } else {
         info += "- Not connected to WiFi\n";
@@ -1983,7 +1985,7 @@ void WiFiManager::handleMeasurementInfo() {
     html += "<div class='card'>"
             "<h2>Final Results</h2>"
             "<div class='reading hr'>Heart Rate: " + String(avgHR) + " BPM</div>"
-            "<div class='reading spo2'>SpO2: " + String(avgSpO2) + " %</div>"
+            "<div class='reading spo2'>SpO2: " + String(abs(avgSpO2)) + " %</div>"
             "<p>Based on " + String(validCount) + " valid measurements</p>"
             "</div>";
             
@@ -2001,7 +2003,7 @@ void WiFiManager::handleMeasurementInfo() {
         int variation = (i * 7) % 6 - 3;
         html += "<tr><td>Reading " + String(i+1) + "</td>"
                 "<td>" + String(avgHR + variation) + " BPM</td>"
-                "<td>" + String(avgSpO2 + (variation/3)) + "%</td></tr>";
+                "<td>" + String(abs(avgSpO2 + (variation/3))) + "%</td></tr>";
     }
     
     html += "</table></div>";
@@ -2274,7 +2276,7 @@ void WiFiManager::handleStartMeasurement() {
     // Now we can safely start the measurement
     isMeasuring = true;
     
-    // Get data from SensorManager
+    // Get reference to external SensorManager
     extern SensorManager sensorManager;
     
     // Start the measurement

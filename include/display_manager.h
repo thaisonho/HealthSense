@@ -38,6 +38,7 @@ public:
     void showAIAnalysisButton();
     void showAIAnalysisLoading();
     void displayAIHealthSummary(const String& summary);
+    void clearScreen(); // Clear the entire screen
 };
 
 #endif // DISPLAY_MANAGER_H
