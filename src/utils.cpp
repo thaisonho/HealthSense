@@ -51,15 +51,29 @@ const int lose_melody_len = sizeof(lose_melody) / sizeof(lose_melody[0]);
 void playMelody(int buzzer_pin, const int melody[], int melody_length, int tempo_divisor) {
     const int base_note_len_ms = 1000 / tempo_divisor;
     const int time_per_note_ms = (int)(base_note_len_ms * 1.3);
+    
+    // For ESP32, we use the LEDC peripheral for tone generation
+    // We assume the pin is already attached to LEDC channel 0 in setup()
+    const int ledc_channel = 0;
 
     for (int i = 0; i < melody_length; i++) {
         int note = melody[i];
 
         if (note != REST) {
-            tone(buzzer_pin, note, base_note_len_ms);
+            // ESP32 tone generation using LEDC
+            ledcWriteTone(ledc_channel, note);
+            delay(base_note_len_ms);
+            ledcWrite(ledc_channel, 0); // Stop the tone
+        } else {
+            // For REST notes
+            ledcWrite(ledc_channel, 0);
+            delay(base_note_len_ms);
         }
-
-        delay(time_per_note_ms);
-        noTone(buzzer_pin);
+        
+        // Short gap between notes
+        delay(time_per_note_ms - base_note_len_ms);
     }
+    
+    // Ensure tone is off when finished
+    ledcWrite(ledc_channel, 0);
 }

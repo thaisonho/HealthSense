@@ -9,6 +9,7 @@
 #include "wifi_manager.h"
 #include "display_manager.h"
 #include "sensor_manager.h"
+#include "mqtt_manager.h"
 #include "images.h"
 
 // Define pins for the ESP32
@@ -19,6 +20,7 @@
 #define TFT_CS     5
 #define TFT_RST    4
 #define TFT_DC     2
+#define BUZZER_PIN 15  // Buzzer connected to pin 15 on ESP32
 
 // Create instances
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
@@ -26,6 +28,7 @@ DisplayManager display(&tft, eva, eva_width, eva_height);
 // IoT API server URL with the correct login endpoint
 WiFiManager wifiManager("HealthSense", "123123123", "https://iot.newnol.io.vn");
 SensorManager sensorManager(100); // buffer size 100
+MQTTManager mqttManager(BUZZER_PIN); // MQTT manager with buzzer pin
 
 // Global app state (using the common AppState enum from common_types.h)
 AppState currentState = STATE_SETUP;
@@ -67,6 +70,11 @@ void setup() {
   
   // Set up AI Analysis callback
   wifiManager.setHandleAIAnalysisCallback(handleAIAnalysisRequest);
+  
+  // Set up MQTT manager with callback to check if device is measuring
+  mqttManager.setIsMeasuringCallback([]() -> bool {
+    return sensorManager.isMeasurementInProgress();
+  });
   
   // Set up callbacks for sensor manager
   sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2) {
@@ -140,6 +148,11 @@ void setup() {
   // Begin WiFi manager (will set up AP mode)
   wifiManager.begin();
   
+  // Initialize the buzzer pin with ESP32 LEDC for tone generation
+  // LEDC channel 0, 5000 Hz frequency, 8-bit resolution
+  ledcSetup(0, 5000, 8);  
+  ledcAttachPin(BUZZER_PIN, 0);  // Attach BUZZER_PIN to LEDC channel 0
+  
   currentState = STATE_SETUP;
   isInitialized = true;
 }
@@ -148,19 +161,21 @@ void loop() {
   // Always process WiFi and web server
   wifiManager.loop();
   
-  // MQTT functionality would be here if implemented
-  // Currently MQTT functionality is not implemented
+  // Process MQTT if WiFi is connected
   if (WiFi.status() == WL_CONNECTED) {
-    // MQTT integration will be added in future updates
-    // For now we just log connection status
-    static bool wifiConnectedMsgSent = false;
-    if (!wifiConnectedMsgSent) {
-      Serial.println(F("📶 WiFi connected, but MQTT not yet implemented"));
-      wifiConnectedMsgSent = true;
+    // Initialize MQTT if not already done (after WiFi connection is established)
+    static bool mqttInitialized = false;
+    if (!mqttInitialized) {
+      Serial.println(F("📶 WiFi connected, initializing MQTT..."));
+      mqttManager.begin();
+      mqttInitialized = true;
     }
+    
+    // Process MQTT messages and maintain connection
+    mqttManager.loop();
   } else {
-    // Reset connection message flag when WiFi disconnects
-    static bool wifiConnectedMsgSent = false;
+    // Reset initialization flag when WiFi disconnects
+    static bool mqttInitialized = false;
   }
   
   // State machine for app behavior
