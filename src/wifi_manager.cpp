@@ -34,7 +34,7 @@ WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password, const cha
     startNewMeasurementCallback(nullptr),
     handleAIAnalysisCallback(nullptr)
 {
-    // Tối ưu CSS bằng cách loại bỏ font Google và tối giản mã CSS
+    // Optimized CSS without Google fonts
     commonCSS = "body{font-family:Arial,sans-serif;margin:0;padding:15px;text-align:center;background:#f0f0f0}"
                 ".container{max-width:400px;margin:0 auto;background:#fff;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,.1)}"
                 "h1{color:#333;font-size:20px;margin-top:0}"
@@ -46,19 +46,17 @@ WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password, const cha
     apIP = IPAddress(192, 168, 4, 1);
     server = new WebServer(80);
     
-    // Cấu hình timeout cho web server để tránh kết nối treo
-    // Phương thức này không tồn tại trong thư viện WebServer tiêu chuẩn nhưng chúng ta có thể thêm vào sau
-    // server->setServerTimeout(10000); // 10 giây timeout
+    // Server timeout configuration (not standard in WebServer library)
     
     dnsServer = new DNSServer();
 }
 
 void WiFiManager::begin() {
-    // Khởi tạo EEPROM
+    // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
     EEPROM.end();
     
-    // Đọc thông tin kết nối WiFi đã lưu
+    // Read saved WiFi credentials
     readWiFiCredentials();
     
     Serial.println("Starting WiFi Manager");
@@ -67,18 +65,18 @@ void WiFiManager::begin() {
     Serial.print("Free heap: ");
     Serial.println(ESP.getFreeHeap());
     
-    // Reset WiFi hoàn toàn trước khi bắt đầu
+    // Complete WiFi reset before starting
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     delay(500);
 
-    // Cấu hình không tiết kiệm năng lượng cho WiFi
+    // Disable power saving for WiFi
     esp_wifi_set_ps(WIFI_PS_NONE);
     
-    // Luôn khởi động ở chế độ AP trước
+    // Always start in AP mode first
     setupAPMode();
     
-    // Thử kết nối với WiFi đã lưu nếu có thông tin
+    // Try to connect to saved WiFi if credentials exist
     if (userSSID.length() > 0) {
         Serial.print("Attempting to connect to saved WiFi: '");
         Serial.print(userSSID);
@@ -97,21 +95,21 @@ void WiFiManager::begin() {
     server->enableCORS(true);
     server->enableCrossOrigin(true);
     
-    // Thiết lập các route cho web server
-    // Giao diện chính và thiết lập WiFi
+    // Setup web server routes
+    // Main interface and WiFi setup
     server->on("/", [this](){ this->handleRoot(); });
     server->on("/wifi", [this](){ this->handleWiFi(); });
     server->on("/connect", HTTP_POST, [this](){ this->handleConnect(); });
     
-    // Các route chức năng chính
+    // Main functionality routes
     server->on("/mode", [this](){ this->handleModeSelect(); });
     server->on("/login", [this](){ this->handleLogin(); });
     server->on("/login_submit", HTTP_POST, [this](){ this->handleLoginSubmit(); });
     server->on("/guest", [this](){ this->handleGuest(); });
     
-    // Các route đo lường và phân tích
+    // Measurement and analysis routes
     server->on("/measurement", [this](){
-        // Giải phóng bộ nhớ trước khi xử lý request đo lường
+        // Free memory before processing measurement request
         ESP.getFreeHeap();
         this->handleMeasurement();
     });
@@ -135,18 +133,18 @@ void WiFiManager::begin() {
     server->on("/library/test/success.html", [this](){ this->handleRoot(); }); // iOS
     server->on("/favicon.ico", HTTP_GET, [this](){ server->send(200, "image/x-icon", ""); });
     
-    // Handler cho các route không tìm thấy
+    // Handler for routes not found
     server->onNotFound([this](){
         // Đảm bảo vẫn giải phóng bộ nhớ
         cleanupConnections();
         this->handleNotFound();
     });
     
-    // Khởi động server
+    // Start server
     server->begin();
     Serial.println("HTTP server started");
     
-    // In thông tin kết nối
+    // Print connection info
     Serial.print("Free heap after setup: ");
     Serial.println(ESP.getFreeHeap());
 }
@@ -582,15 +580,15 @@ void WiFiManager::handleWiFi() {
                   "</head>"
                   "<body>"
                   "<div class='container'>"
-                  "<h1>Kết Nối WiFi</h1>"
+                  "<h1>WiFi Connection</h1>"
                   "<form action='/connect' method='post'>"
-                  "<label for='ssid'>Tên mạng WiFi:</label><br>"
-                  "<input type='text' id='ssid' name='ssid' placeholder='Nhập tên WiFi' required><br>"
-                  "<label for='password'>Mật khẩu WiFi:</label><br>"
-                  "<input type='password' id='password' name='password' placeholder='Nhập mật khẩu'><br>"
-                  "<input type='submit' value='Kết Nối'>"
+                  "<label for='ssid'>WiFi Network Name:</label><br>"
+                  "<input type='text' id='ssid' name='ssid' placeholder='Enter WiFi name' required><br>"
+                  "<label for='password'>WiFi Password:</label><br>"
+                  "<input type='password' id='password' name='password' placeholder='Enter password'><br>"
+                  "<input type='submit' value='Connect'>"
                   "</form>"
-                  "<form action='/' method='get'><button type='submit' class='back-btn'>Quay Lại</button></form>"
+                  "<form action='/' method='get'><button type='submit' class='back-btn'>Back</button></form>"
                   "</div>"
                   "</body></html>";
     server->send(200, "text/html", html);
@@ -600,19 +598,19 @@ void WiFiManager::handleConnect() {
     String ssid = server->arg("ssid");
     String password = server->arg("password");
     
-    // Tách quá trình kết nối và phản hồi HTTP để tránh lỗi connection abort
+    // Separate connection process and HTTP response to avoid connection abort
     if (ssid.length() > 0) {
-        // Đầu tiên lưu thông tin kết nối
+        // First save connection information
         userSSID = ssid;
         userPassword = password;
         isGuestMode = false;
         saveWiFiCredentials(ssid, password, false);
         
-        // Gửi trang HTML thông báo đang kết nối TRƯỚC khi thử kết nối WiFi
+        // Send HTML page with connection status BEFORE attempting WiFi connection
         String loadingHtml = "<!DOCTYPE html><html>"
                     "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
                     "<meta charset='UTF-8'>"
-                    "<title>Đang kết nối WiFi...</title>"
+                    "<title>Connecting to WiFi...</title>"
                     "<style>body{font-family:Arial;text-align:center;padding:20px;background:#f0f0f0;}"
                     ".container{max-width:400px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1);}"
                     ".spinner{width:40px;height:40px;margin:20px auto;border-radius:50%;border:5px solid #f3f3f3;border-top:5px solid #3498db;animation:spin 1s linear infinite;}"
@@ -620,82 +618,82 @@ void WiFiManager::handleConnect() {
                     "<meta http-equiv='refresh' content='2;url=/connect_status'>"
                     "</head>"
                     "<body><div class='container'>"
-                    "<h1>Đang kết nối WiFi</h1>"
-                    "<p>Đang kết nối tới mạng: <strong>" + ssid + "</strong></p>"
+                    "<h1>Connecting to WiFi</h1>"
+                    "<p>Connecting to network: <strong>" + ssid + "</strong></p>"
                     "<div class='spinner'></div>"
-                    "<p>Vui lòng đợi trong giây lát...</p>"
+                    "<p>Please wait a moment...</p>"
                     "</div></body></html>";
         
-        // Gửi trang loading và đóng kết nối HTTP trước khi tiến hành kết nối WiFi
+        // Send loading page and close HTTP connection before starting WiFi connection
         server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
         server->send(200, "text/html", loadingHtml);
         
-        // Đăng ký handler mới để hiển thị kết quả sau khi chuyển hướng
+        // Register new handler to display results after redirect
         server->on("/connect_status", [this, ssid, password]() {
-            // Thử kết nối WiFi
+            // Try WiFi connection
             Serial.println("Attempting WiFi connection from web interface...");
             Serial.print("SSID: '");
             Serial.print(ssid);
             Serial.print("', Password length: ");
             Serial.println(password.length());
             
-            // Thử kết nối WiFi
+            // Attempt WiFi connection
             isConnected = connectToWiFi(ssid, password);
             
-            // Nếu lần đầu thất bại, reset WiFi và thử lại
+            // If first attempt fails, reset WiFi and try again
             if (!isConnected) {
                 Serial.println("First connection attempt failed, trying again after reset...");
                 WiFi.disconnect(true);
-                delay(500); // Giảm thời gian delay
+                delay(500); // Reduced delay time
                 isConnected = connectToWiFi(ssid, password);
             }
             
-            // Chuẩn bị HTML kết quả
+            // Prepare HTML result
             String html = "<!DOCTYPE html><html>"
                         "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
                         "<meta charset='UTF-8'>"
-                        "<title>Kết quả kết nối</title>"
+                        "<title>Connection Result</title>"
                         "<style>body{font-family:Arial;text-align:center;padding:20px;background:#f0f0f0;}"
                         ".container{max-width:400px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1);}"
                         ".success{color:#4CAF50;font-weight:bold;font-size:16px;}"
                         ".error{color:#f44336;font-weight:bold;font-size:16px;}"
                         "button{background:#4CAF50;color:white;padding:10px 15px;border:none;border-radius:4px;cursor:pointer;margin:10px 0;width:100%;}</style>"
                         "</head><body><div class='container'>"
-                        "<h1>Kết Quả Kết Nối</h1>";
+                        "<h1>Connection Result</h1>";
             
             if (isConnected) {
-                html += "<p class='success'>✅ Kết nối WiFi thành công!</p>"
-                        "<p>Đã kết nối tới: <strong>" + ssid + "</strong></p>"
+                html += "<p class='success'>✅ WiFi connection successful!</p>"
+                        "<p>Connected to: <strong>" + ssid + "</strong></p>"
                         "<p>IP: " + WiFi.localIP().toString() + "</p>";
                         
                 if (WiFi.RSSI() > -70) {
-                    html += "<p>Tín hiệu: Mạnh (-" + String(abs(WiFi.RSSI())) + " dBm)</p>";
+                    html += "<p>Signal: Strong (-" + String(abs(WiFi.RSSI())) + " dBm)</p>";
                 } else if (WiFi.RSSI() > -85) {
-                    html += "<p>Tín hiệu: Trung bình (-" + String(abs(WiFi.RSSI())) + " dBm)</p>";
+                    html += "<p>Signal: Medium (-" + String(abs(WiFi.RSSI())) + " dBm)</p>";
                 } else {
-                    html += "<p>Tín hiệu: Yếu (-" + String(abs(WiFi.RSSI())) + " dBm)</p>";
+                    html += "<p>Signal: Weak (-" + String(abs(WiFi.RSSI())) + " dBm)</p>";
                 }
                 
-                html += "<form action='/mode'><button type='submit'>Tiếp tục</button></form>";
+                html += "<form action='/mode'><button type='submit'>Continue</button></form>";
             } else {
-                html += "<p class='error'>❌ Kết nối WiFi thất bại!</p>";
+                html += "<p class='error'>❌ WiFi connection failed!</p>";
                 
-                // Hiển thị lỗi cụ thể dựa trên mã trạng thái
+                // Show specific error based on status code
                 switch (WiFi.status()) {
                     case WL_NO_SSID_AVAIL:
-                        html += "<p>Không tìm thấy mạng WiFi</p>";
+                        html += "<p>WiFi network not found</p>";
                         break;
                     case WL_CONNECT_FAILED:
-                        html += "<p>Sai mật khẩu hoặc xác thực thất bại</p>";
+                        html += "<p>Wrong password or authentication failed</p>";
                         break;
                     default:
-                        html += "<p>Mã lỗi: " + String(WiFi.status()) + "</p>";
+                        html += "<p>Error code: " + String(WiFi.status()) + "</p>";
                         break;
                 }
                 
-                html += "<form action='/wifi'><button type='submit'>Thử lại</button></form>";
+                html += "<form action='/wifi'><button type='submit'>Try Again</button></form>";
                 
-                // Đảm bảo chế độ AP vẫn hoạt động để có thể cấu hình lại
+                // Ensure AP mode is still active to allow reconfiguration
                 if (!apModeActive) {
                     setupAPMode();
                 }
@@ -703,11 +701,11 @@ void WiFiManager::handleConnect() {
             
             html += "</div></body></html>";
             
-            // Gửi HTML kết quả
+            // Send HTML result
             server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
             server->send(200, "text/html", html);
             
-            // Cập nhật trạng thái kết nối thông qua callback
+            // Update connection status through callback
             if (updateConnectionStatusCallback) {
                 updateConnectionStatusCallback(isConnected, false, false);
             }
@@ -1510,7 +1508,7 @@ void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
 bool WiFiManager::getAIHealthSummary(String& summary) {
     if (!isConnected) {
         Serial.println(F("Not connected to WiFi"));
-        summary = "Không có kết nối WiFi";
+        summary = "No WiFi connection";
         return false;
     }
     
@@ -1534,7 +1532,7 @@ bool WiFiManager::getAIHealthSummary(String& summary) {
     // Initialize HTTP client with simple error checking
     if (!http.begin(url)) {
         Serial.println(F("HTTP init failed"));
-        summary = "Lỗi kết nối HTTP";
+        summary = "HTTP connection error";
         return false;
     }
     
@@ -1570,13 +1568,13 @@ bool WiFiManager::getAIHealthSummary(String& summary) {
                     summary = summary.substring(0, 500) + "...";
                 }
             } else {
-                summary = "Không thể đọc dữ liệu AI";
+                summary = "Unable to read AI data";
             }
         } else {
-            summary = "Không tìm thấy kết quả phân tích";
+            summary = "No analysis results found";
         }
     } else {
-        summary = "Lỗi kết nối: " + String(httpCode);
+        summary = "Connection error: " + String(httpCode);
         Serial.print(F("HTTP error: "));
         Serial.println(httpCode);
     }
