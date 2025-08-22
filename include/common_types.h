@@ -1,7 +1,8 @@
 #ifndef COMMON_TYPES_H
 #define COMMON_TYPES_H
 
-#define DEVICE_ID "esp"
+// Device-specific identifiers
+#define DEVICE_ID "esp"  
 #define DEVICE_SECRET "ngotantai"
 #define USER_ID "default_user_id"
 

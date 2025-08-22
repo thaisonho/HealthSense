@@ -1,4 +1,5 @@
 #include "sensor_manager.h"
+#include "display_manager.h" // Include the DisplayManager header
 
 SensorManager::SensorManager(int bufferSize) : 
     bufferLength(bufferSize),
@@ -197,6 +198,12 @@ void SensorManager::resetSensor() {
 }
 
 void SensorManager::processReadings() {
+    // Skip processing if measurement is already complete to prevent continued measurements
+    if (measurementComplete) {
+        Serial.println(F("🛑 Skipping processReadings() - measurement already complete"));
+        return;
+    }
+    
     if (!sensorReady) {
         // Try to reinitialize sensor if it's not ready
         resetSensor();
@@ -225,21 +232,52 @@ void SensorManager::processReadings() {
         Serial.print(F(", ir="));
         Serial.print(irBuffer[i], DEC);
 
-        Serial.print(F(", HR="));
-        Serial.print(heartRate, DEC);
-
-        Serial.print(F(", HRvalid="));
-        Serial.print(validHeartRate, DEC);
-
-        Serial.print(F(", SPO2="));
-        Serial.print(spo2, DEC);
-
-        Serial.print(F(", SPO2Valid="));
-        Serial.println(validSPO2, DEC);
+        // Only print HR and SpO2 values if they're valid
+        if (isFingerDetected()) {
+            Serial.print(F(", HR="));
+            Serial.print(heartRate, DEC);
+            
+            Serial.print(F(", HRvalid="));
+            Serial.print(validHeartRate, DEC);
+            
+            Serial.print(F(", SPO2="));
+            Serial.print(spo2, DEC);
+            
+            Serial.print(F(", SPO2Valid="));
+            Serial.println(validSPO2, DEC);
+        } else {
+            Serial.println(F(" - No finger detected"));
+        }
     }
     
     // After gathering 25 new samples recalculate HR and SP02
+    int32_t originalSpo2 = spo2;
     maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+    
+    // Debug the SpO2 value
+    Serial.print(F("📊 Original SpO2: "));
+    Serial.print(originalSpo2);
+    Serial.print(F(" → New SpO2: "));
+    Serial.println(spo2);
+    
+    // Make sure SpO2 is positive - use absolute value
+    if (spo2 < 0) {
+        Serial.print(F("⚠️ Negative SpO2 detected: "));
+        Serial.print(spo2);
+        Serial.print(F(" → Converting to positive: "));
+        spo2 = abs(spo2);
+        Serial.println(spo2);
+    }
+    
+    // Check if a finger is actually detected BEFORE we validate any readings
+    bool fingerPresent = isFingerDetected();
+    if (!fingerPresent) {
+        // If no finger detected, immediately mark readings as invalid
+        validHeartRate = 0;
+        validSPO2 = 0;
+        Serial.println(F("No finger detected, marking readings as invalid"));
+        return; // Skip further validation since there's no finger
+    }
     
     // Additional validation for extreme HR values
     if (heartRate == -999) {
@@ -276,8 +314,8 @@ void SensorManager::processReadings() {
     Serial.print(F(", SPO2Valid="));
     Serial.println(validSPO2);
     
-    // Store current valid reading for display
-    if (validHeartRate && validSPO2) {
+    // Store current valid reading for display only if finger is present
+    if (validHeartRate && validSPO2 && isFingerDetected()) {
         Serial.print(F("Current valid reading: HR="));
         Serial.print(heartRate);
         Serial.print(F(", SpO2="));
@@ -302,10 +340,10 @@ void SensorManager::processReadings() {
             return;
         }
         
-        // Only add reading if both HR and SpO2 are valid
-        if (validHeartRate && validSPO2) {
+        // Only add reading if both HR and SpO2 are valid AND finger is detected
+        if (validHeartRate && validSPO2 && isFingerDetected()) {
             validReadings[validReadingCount][0] = heartRate;
-            validReadings[validReadingCount][1] = spo2;
+            validReadings[validReadingCount][1] = abs(spo2); // Use abs to ensure positive value
             validReadingCount++;
             
             Serial.print(F("✓ Valid reading "));
@@ -332,7 +370,7 @@ void SensorManager::processReadings() {
                 }
                 
                 averagedHR = totalHR / REQUIRED_VALID_READINGS;
-                averagedSpO2 = totalSpO2 / REQUIRED_VALID_READINGS;
+                averagedSpO2 = abs(totalSpO2 / REQUIRED_VALID_READINGS); // Use abs to ensure positive value
                 measurementComplete = true;
                 isMeasuring = false;
                 
@@ -394,12 +432,12 @@ bool SensorManager::isFingerDetected() const {
         return false;
     }
     
-    // During measurement, be less strict about finger detection to avoid false negatives
-    uint32_t threshold_ir = isMeasuring ? (IR_SIGNAL_THRESHOLD * 0.7) : IR_SIGNAL_THRESHOLD;
-    uint32_t threshold_red = isMeasuring ? (RED_SIGNAL_THRESHOLD * 0.7) : RED_SIGNAL_THRESHOLD;
+    // Set appropriate thresholds based on the typical signal levels observed in log
+    uint32_t threshold_ir = IR_SIGNAL_THRESHOLD;
+    uint32_t threshold_red = RED_SIGNAL_THRESHOLD;
     
-    // We'll use the last 10 samples to make a more stable decision
-    const int sampleCount = 10;
+    // We'll use more samples to make a more stable decision
+    const int sampleCount = 25; // Use more samples for better detection
     int startIdx = (bufferLength > sampleCount) ? bufferLength - sampleCount : 0;
     
     // Calculate average values
@@ -432,7 +470,8 @@ bool SensorManager::isFingerDetected() const {
     // Check if IR signal is in the expected range for a finger
     // and IR is significantly larger than red (typical for a finger on sensor)
     bool signalPresent = (avgIR > threshold_ir) && (avgRed > threshold_red);
-    bool properRatio = (avgIR > avgRed * 0.8); // IR should be larger than red for a finger
+    // For MAX30105, IR should be greater than RED but not by too much - adjust ratio check
+    bool properRatio = (avgIR > avgRed * 0.9) && (avgIR < avgRed * 1.5);
     
     if (!signalPresent || !properRatio) {
         Serial.print(F("🔍 Finger detection failed - avgIR: "));
@@ -443,7 +482,9 @@ bool SensorManager::isFingerDetected() const {
         Serial.print(avgRed);
         Serial.print(F(" (need >"));
         Serial.print(threshold_red);
-        Serial.print(F("), ratio OK: "));
+        Serial.print(F("), IR/Red ratio: "));
+        Serial.print(avgIR / (float)avgRed, 2);
+        Serial.print(F(" (need 0.9-1.5), detection: "));
         Serial.println(properRatio ? "YES" : "NO");
     }
     
@@ -488,6 +529,14 @@ void SensorManager::startMeasurement() {
     Serial.print(F(" valid readings for averaging (timeout: "));
     Serial.print(MEASUREMENT_TIMEOUT_MS / 1000);
     Serial.println(F(" seconds)..."));
+    
+    // Make sure sensor is ready
+    if (!sensorReady) {
+        Serial.println(F("⚠️ Sensor not ready! Initializing..."));
+        initializeSensor();
+    }
+    
+    Serial.println(F("✅ Measurement started!"));
 }
 
 void SensorManager::stopMeasurement() {

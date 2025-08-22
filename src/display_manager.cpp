@@ -1,5 +1,9 @@
 #include "display_manager.h"
 #include "images.h"
+#include "sensor_manager.h"
+
+// Reference to the SensorManager instance in main.cpp
+extern SensorManager sensorManager;
 
 DisplayManager::DisplayManager(Adafruit_ST7735* tft, const uint16_t* logo, uint16_t logoWidth, uint16_t logoHeight) :
     tft(tft),
@@ -56,11 +60,39 @@ void DisplayManager::showConnectionSuccess(String ipAddress) {
     tft->println(ipAddress);
 }
 
-void DisplayManager::showConnectionFailure() {
-    tft->fillRect(0, 130, 160, 30, ST7735_BLACK);
+void DisplayManager::showConnectionFailure(int errorCode) {
+    tft->fillRect(0, 130, 160, 50, ST7735_BLACK);
     tft->setCursor(5, 130);
     tft->setTextColor(ST7735_RED);
     tft->println("WiFi Connection Failed");
+    
+    tft->setCursor(5, 140);
+    tft->setTextColor(ST7735_YELLOW);
+    
+    // Display specific error message based on WiFi status code
+    switch(errorCode) {
+        case WL_NO_SSID_AVAIL:
+            tft->println("SSID not found");
+            break;
+        case WL_CONNECT_FAILED:
+            tft->println("Wrong password");
+            break;
+        case WL_IDLE_STATUS:
+            tft->println("Idle - still trying");
+            break;
+        case WL_CONNECTION_LOST:
+            tft->println("Connection lost");
+            break;
+        default:
+            tft->print("Error code: ");
+            tft->println(errorCode);
+            break;
+    }
+    
+    // Show helpful advice
+    tft->setCursor(5, 150);
+    tft->setTextColor(ST7735_WHITE);
+    tft->println("Check network settings");
 }
 
 void DisplayManager::showGuestMode() {
@@ -157,46 +189,164 @@ void DisplayManager::setupSensorUI() {
 }
 
 void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2) {
-    // Clear previous readings
-    tft->fillRect(75, 90, 80, 10, ST7735_BLACK);  // Clear heart rate value area
-    tft->fillRect(45, 110, 80, 10, ST7735_BLACK); // Clear SpO2 value area
+    static int lastValidCount = 0;
+    extern SensorManager sensorManager;  // Reference to the SensorManager instance
     
-    // Display heart rate
-    tft->setCursor(75, 90);
-    tft->setTextColor(ST7735_RED);
-    if (validHR) {
-        tft->print(heartRate);
-        tft->print(" BPM");
-    } else {
-        tft->print("-- BPM");
+    // Debug SpO2 value
+    if (validSPO2) {
+        Serial.print(F("📊 LCD Display - SpO2 value: "));
+        Serial.print(spo2);
+        Serial.print(F(" (abs: "));
+        Serial.print(abs(spo2));
+        Serial.println(F(")"));
     }
     
-    // Display SpO2
-    tft->setCursor(45, 110);
-    tft->setTextColor(ST7735_BLUE);
-    if (validSPO2) {
-        tft->print(spo2);
+    // Clear previous readings
+    tft->fillRect(75, 90, 80, 10, ST7735_BLACK);  // Clear heart rate value area
+    tft->fillRect(40, 110, 85, 10, ST7735_BLACK); // Clear SpO2 value area with wider width
+    
+    // Clear status line if valid count changes
+    if (lastValidCount != sensorManager.getValidReadingCount()) {
+        tft->fillRect(0, 150, 160, 20, ST7735_BLACK);
+        lastValidCount = sensorManager.getValidReadingCount();
+    }
+    
+    // Check if measurement is complete
+    if (sensorManager.isMeasurementReady()) {
+        // Display complete message and averages
+        tft->fillRect(0, 70, 160, 20, ST7735_BLACK);
+        tft->setCursor(5, 70);
+        tft->setTextColor(ST7735_GREEN);
+        tft->println("MEASUREMENT COMPLETE");
+        
+        // Display averaged heart rate
+        tft->setCursor(75, 90);
+        tft->setTextColor(ST7735_RED);
+        tft->print(sensorManager.getAveragedHR());
+        tft->print(" BPM");
+        
+        // Display averaged SpO2 - completely rewriting the SpO2 area
+        tft->fillRect(5, 110, 120, 10, ST7735_BLACK); // Clear entire SpO2 line
+        tft->setCursor(5, 110);
+        tft->setTextColor(ST7735_BLUE);
+        tft->print("SpO2: ");
+        
+        // Force positive value
+        uint32_t positiveSpO2 = abs(sensorManager.getAveragedSpO2());
+        tft->print(positiveSpO2);
         tft->print(" %");
+        
+        // Show progress - complete message
+        tft->setCursor(5, 150);
+        tft->setTextColor(ST7735_GREEN);
+        tft->print("Results ready (5/5)");
+    }
+    else if (sensorManager.isMeasurementInProgress()) {
+        // Display heart rate
+        tft->setCursor(75, 90);
+        tft->setTextColor(ST7735_RED);
+        if (validHR) {
+            tft->print(heartRate);
+            tft->print(" BPM");
+        } else {
+            tft->print("-- BPM");
+        }
+        
+        // Show progress
+        tft->setCursor(5, 150);
+        tft->setTextColor(ST7735_YELLOW);
+        tft->print("Progress: ");
+        tft->print(sensorManager.getValidReadingCount());
+        tft->print("/5");
+    }
+    else {
+        // Regular display for non-measurement state
+        tft->setCursor(75, 90);
+        tft->setTextColor(ST7735_RED);
+        if (validHR) {
+            tft->print(heartRate);
+            tft->print(" BPM");
+        } else {
+            tft->print("-- BPM");
+        }
+    }
+    
+    // Display SpO2 - completely rewriting the SpO2 area
+    tft->fillRect(5, 110, 120, 10, ST7735_BLACK); // Clear entire SpO2 line
+    tft->setCursor(5, 110);
+    tft->setTextColor(ST7735_BLUE);
+    tft->print("SpO2: ");
+    
+    if (validSPO2) {
+        // Force positive value and format as SpO2: XX %
+        uint32_t positiveSpO2 = abs(spo2);
+        tft->print(positiveSpO2);
+        tft->print(" %");
+        
+        // Debug output to verify
+        Serial.print(F("✓ SpO2 displayed as: "));
+        Serial.println(positiveSpO2);
     } else {
         tft->print("-- %");
+    }
+    
+    // Only update these values if we're not showing averages
+    if (!sensorManager.isMeasurementReady() && 
+        !sensorManager.isMeasurementInProgress()) {
+        // Show finger detection status
+        tft->fillRect(0, 150, 160, 10, ST7735_BLACK);
+        tft->setCursor(5, 150);
+        tft->setTextColor(ST7735_WHITE);
+        tft->print("Place finger on sensor");
     }
 }
 
 void DisplayManager::showMeasuringStatus() {
-    tft->fillRect(5, 130, 160, 10, ST7735_BLACK);
-    tft->setCursor(5, 130);
-    tft->setTextColor(ST7735_GREEN);
-    tft->print("Measuring...");
-}
-
-void DisplayManager::showFingerStatus(bool fingerDetected) {
-    tft->fillRect(5, 130, 160, 10, ST7735_BLACK);
+    extern SensorManager sensorManager;
+    
+    tft->fillRect(0, 130, 160, 10, ST7735_BLACK);
     tft->setCursor(5, 130);
     tft->setTextColor(ST7735_GREEN);
     
-    if (fingerDetected) {
-        tft->print("Finger detected");
+    if (sensorManager.isMeasurementInProgress()) {
+        tft->print("Measuring (");
+        tft->print(sensorManager.getValidReadingCount());
+        tft->print("/");
+        tft->print(REQUIRED_VALID_READINGS);
+        tft->print(")");
+    } else if (sensorManager.isMeasurementReady()) {
+        tft->print("Complete");
     } else {
+        tft->print("Measuring...");
+    }
+}
+
+void DisplayManager::showFingerStatus(bool fingerDetected) {
+    extern SensorManager sensorManager;
+    
+    // Don't update finger status if measurement is complete
+    if (sensorManager.isMeasurementReady()) {
+        return;
+    }
+    
+    tft->fillRect(5, 130, 160, 10, ST7735_BLACK);
+    tft->setCursor(5, 130);
+    
+    if (fingerDetected) {
+        tft->setTextColor(ST7735_GREEN);
+        tft->print("Finger detected");
+        
+        // Show measuring status if in progress
+        if (sensorManager.isMeasurementInProgress()) {
+            tft->fillRect(0, 150, 160, 10, ST7735_BLACK);
+            tft->setCursor(5, 150);
+            tft->setTextColor(ST7735_YELLOW);
+            tft->print("Progress: ");
+            tft->print(sensorManager.getValidReadingCount());
+            tft->print("/5");
+        }
+    } else {
+        tft->setTextColor(ST7735_RED);
         tft->print("Place finger...");
     }
 }
@@ -321,4 +471,17 @@ void DisplayManager::displayAIHealthSummary(const String& summary) {
     // Track memory usage for debugging
     Serial.print(F("💾 Free memory after display: "));
     Serial.println(ESP.getFreeHeap());
+}
+
+void DisplayManager::clearScreen() {
+    // Fill the entire screen with black color
+    tft->fillScreen(ST7735_BLACK);
+    
+    // Draw the logo at the top (if it was there before)
+    if (logo != nullptr) {
+        tft->drawRGBBitmap((160 - logoWidth)/2, 0, logo, logoWidth, logoHeight);
+    }
+    
+    // Log the action
+    Serial.println(F("📱 Screen cleared"));
 }

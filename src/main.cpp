@@ -9,6 +9,7 @@
 #include "wifi_manager.h"
 #include "display_manager.h"
 #include "sensor_manager.h"
+#include "mqtt_manager.h"
 #include "images.h"
 
 // Define pins for the ESP32
@@ -19,6 +20,7 @@
 #define TFT_CS     5
 #define TFT_RST    4
 #define TFT_DC     2
+#define BUZZER_PIN 15  // Buzzer connected to pin 15 on ESP32
 
 // Create instances
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
@@ -26,6 +28,7 @@ DisplayManager display(&tft, eva, eva_width, eva_height);
 // IoT API server URL with the correct login endpoint
 WiFiManager wifiManager("HealthSense", "123123123", "https://iot.newnol.io.vn");
 SensorManager sensorManager(100); // buffer size 100
+MQTTManager mqttManager(BUZZER_PIN); // MQTT manager with buzzer pin
 
 // Global app state (using the common AppState enum from common_types.h)
 AppState currentState = STATE_SETUP;
@@ -56,12 +59,22 @@ void setup() {
   wifiManager.setStartNewMeasurementCallback([]() {
     Serial.println(F("Starting new measurement from web interface..."));
     if (sensorManager.isReady()) {
+      // Clear screen first
+      display.clearScreen();
+      // Setup sensor UI after clearing
+      display.setupSensorUI();
+      // Start the measurement
       sensorManager.startMeasurement();
     }
   });
   
   // Set up AI Analysis callback
   wifiManager.setHandleAIAnalysisCallback(handleAIAnalysisRequest);
+  
+  // Set up MQTT manager with callback to check if device is measuring
+  mqttManager.setIsMeasuringCallback([]() -> bool {
+    return sensorManager.isMeasurementInProgress();
+  });
   
   // Set up callbacks for sensor manager
   sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2) {
@@ -88,6 +101,11 @@ void setup() {
       Serial.print(sensorManager.isMeasurementInProgress() ? "YES" : "NO");
       Serial.print(F(", WiFi measurement active: "));
       Serial.println(wifiManager.isMeasurementActive() ? "YES" : "NO");
+      // Clear screen before starting measurement
+      display.clearScreen();
+      // Setup sensor UI after clearing
+      display.setupSensorUI();
+      // Start the measurement
       sensorManager.startMeasurement();
     } else if (fingerDetected && sensorManager.isMeasurementInProgress()) {
       Serial.println(F("👆 Finger detected but measurement already in progress"));
@@ -119,12 +137,21 @@ void setup() {
     // Send final averaged data to server (only if in user mode and logged in)
     wifiManager.sendSensorData(avgHR, avgSpO2);
     
+    // IMPORTANT FIX: Stop measurement in WiFiManager too
+    wifiManager.stopMeasurement();
+    Serial.println(F("Stopped measurement in WiFiManager"));
+    
     Serial.println(F("Measurement cycle complete. Sensor stopped."));
     Serial.println(F("Press 'Start New Measurement' to measure again."));
   });
   
   // Begin WiFi manager (will set up AP mode)
   wifiManager.begin();
+  
+  // Initialize the buzzer pin with ESP32 LEDC for tone generation
+  // LEDC channel 0, 5000 Hz frequency, 8-bit resolution
+  ledcSetup(0, 5000, 8);  
+  ledcAttachPin(BUZZER_PIN, 0);  // Attach BUZZER_PIN to LEDC channel 0
   
   currentState = STATE_SETUP;
   isInitialized = true;
@@ -133,6 +160,23 @@ void setup() {
 void loop() {
   // Always process WiFi and web server
   wifiManager.loop();
+  
+  // Process MQTT if WiFi is connected
+  if (WiFi.status() == WL_CONNECTED) {
+    // Initialize MQTT if not already done (after WiFi connection is established)
+    static bool mqttInitialized = false;
+    if (!mqttInitialized) {
+      Serial.println(F("📶 WiFi connected, initializing MQTT..."));
+      mqttManager.begin();
+      mqttInitialized = true;
+    }
+    
+    // Process MQTT messages and maintain connection
+    mqttManager.loop();
+  } else {
+    // Reset initialization flag when WiFi disconnects
+    static bool mqttInitialized = false;
+  }
   
   // State machine for app behavior
   switch (currentState) {
@@ -167,6 +211,48 @@ void loop() {
       
       // Only process sensor readings when in measuring state, sensor is ready, and we should be measuring
       static bool initialReadingDone = false;
+      static unsigned long lastDebugTime = 0;
+      
+      // Debug output every 3 seconds to monitor measurement state
+      if (millis() - lastDebugTime > 3000) {
+        Serial.print(F("📊 Measurement States - Sensor isMeasuring: "));
+        Serial.print(sensorManager.isMeasurementInProgress() ? "YES" : "NO");
+        Serial.print(F(", measurementComplete: "));
+        Serial.print(sensorManager.isMeasurementReady() ? "YES" : "NO");
+        Serial.print(F(", WiFi isMeasuring: "));
+        Serial.println(wifiManager.isMeasurementActive() ? "YES" : "NO");
+        
+        // Also show reading count in this debug output
+        if (sensorManager.isMeasurementInProgress() || sensorManager.isMeasurementReady()) {
+          Serial.print(F("  - Valid readings: "));
+          Serial.print(sensorManager.getValidReadingCount());
+          Serial.print(F("/"));
+          Serial.print(REQUIRED_VALID_READINGS);
+          
+          if (sensorManager.isMeasurementReady()) {
+            Serial.print(F(" ✓ Final HR: "));
+            Serial.print(sensorManager.getAveragedHR());
+            Serial.print(F(", SpO2: "));
+            Serial.print(sensorManager.getAveragedSpO2());
+          }
+          Serial.println();
+        }
+        
+        lastDebugTime = millis();
+      }
+      
+      // IMPORTANT CHANGE: Check if wifiManager's measurement flag is set
+      // and sensor is not yet measuring - start the sensor measurement if needed
+      if (wifiManager.isMeasurementActive() && !sensorManager.isMeasurementInProgress() && 
+          !sensorManager.isMeasurementReady() && sensorManager.isReady()) {
+        Serial.println(F("🔄 Main loop detected WiFi measurement flag set but sensor not measuring yet - starting sensor"));
+        // Clear screen before starting measurement
+        display.clearScreen();
+        // Setup sensor UI after clearing
+        display.setupSensorUI();
+        // Start the measurement
+        sensorManager.startMeasurement();
+      }
       
       if (sensorManager.isReady() && wifiManager.isMeasurementActive()) {
         
@@ -180,6 +266,11 @@ void loop() {
         // This will keep collecting samples until we have 5 valid readings
         sensorManager.processReadings();
         
+        // Check if measurement just completed
+        if (sensorManager.isMeasurementReady()) {
+          Serial.println(F("✅ Main loop detected measurement completion"));
+        }
+        
       } else {
         // Reset flag when measurement is not active
         initialReadingDone = false;
@@ -187,6 +278,7 @@ void loop() {
         if (wifiManager.isMeasurementActive() && !sensorManager.isReady()) {
           // If we're supposed to be measuring but sensor isn't ready,
           // try to reinitialize it
+          Serial.println(F("⚠️ WiFi measurement active but sensor not ready - reinitializing sensor"));
           sensorManager.initializeSensor();
           delay(100);
         }
@@ -222,16 +314,24 @@ void updateConnectionStatus(bool connected, bool guestMode, bool loggedIn) {
     // User mode with successful login
     display.showLoggedIn();
     currentState = STATE_MEASURING;
+    
+    // MQTT will be started in the main loop
+    Serial.println(F("🦟 Connection successful - User logged in"));
   } else if (guestMode) {
     // Guest mode
     display.showGuestMode();
     currentState = STATE_MEASURING;
+    
+    // MQTT will be started in the main loop
+    Serial.println(F("🦟 Connection successful - Guest mode"));
   } else if (connected && !loggedIn) {
     // Connected but not logged in yet
+    display.showConnectionSuccess(WiFi.localIP().toString());
     currentState = STATE_LOGIN;
     sensorManager.setReady(false);
   } else {
-    // Not connected
+    // Not connected - show specific error code from WiFiManager
+    display.showConnectionFailure(wifiManager.getLastWifiErrorCode());
     currentState = STATE_SETUP;
     sensorManager.setReady(false);
   }

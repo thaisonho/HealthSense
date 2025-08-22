@@ -25,7 +25,7 @@ public:
     void showWiFiSetupScreen(const char* apSSID, const char* apPassword);
     void showConnectionAttempt(String ssid);
     void showConnectionSuccess(String ipAddress);
-    void showConnectionFailure();
+    void showConnectionFailure(int errorCode = -1);
     void showGuestMode();
     void showLoggedIn();
     void showLoginPage();
@@ -38,6 +38,7 @@ public:
     void showAIAnalysisButton();
     void showAIAnalysisLoading();
     void displayAIHealthSummary(const String& summary);
+    void clearScreen(); // Clear the entire screen
 };
 
 #endif // DISPLAY_MANAGER_H
