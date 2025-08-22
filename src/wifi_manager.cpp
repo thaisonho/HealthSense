@@ -117,6 +117,8 @@ void WiFiManager::begin() {
     server->on("/measurement_info", [this](){ this->handleMeasurementInfo(); });
     server->on("/measurement_stream", [this](){ this->handleMeasurementStream(); });
     server->on("/continue_measuring", [this](){ this->handleContinueMeasuring(); });
+    server->on("/start_measurement", [this](){ this->handleStartMeasurement(); }); // New endpoint for browser to confirm page load
+    server->on("/check_measurement_status", [this](){ this->handleCheckMeasurementStatus(); }); // New endpoint to check if measurement is complete
     server->on("/ai_analysis", [this](){ this->handleAIAnalysis(); });
     server->on("/return_to_measurement", [this](){ this->handleReturnToMeasurement(); });
     
@@ -431,18 +433,36 @@ void WiFiManager::checkWiFiConnection() {
     // Check if we lost WiFi connection
     if (isConnected && WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi connection lost!");
+        Serial.print("Current SSID: '");
+        Serial.print(userSSID);
+        Serial.print("', Password length: ");
+        Serial.println(userPassword.length());
+        Serial.print("Guest Mode: ");
+        Serial.println(isGuestMode ? "YES" : "NO");
+        
         isConnected = false;
         connectionErrorCounter++;
         
         // Try to reconnect with saved credentials
         if (userSSID.length() > 0) {
             Serial.println("Attempting to reconnect...");
+            
+            // Clean up any existing connections first
+            WiFi.disconnect(true);
+            delay(200);  // Give it time to disconnect properly
+            
+            // Ensure we're in the correct mode (AP+STA)
             WiFi.mode(WIFI_AP_STA);
+            delay(200);  // Give it time to change mode
+            
+            // Now try to connect
+            Serial.print("Connecting to SSID: ");
+            Serial.println(userSSID);
             WiFi.begin(userSSID.c_str(), userPassword.c_str());
             
-            // Give it a few seconds to reconnect
+            // Give it a few seconds to reconnect - longer timeout
             int attempts = 0;
-            while (WiFi.status() != WL_CONNECTED && attempts < 6) { // Shorter timeout
+            while (WiFi.status() != WL_CONNECTED && attempts < 20) { // Longer timeout (6s)
                 delay(300);
                 Serial.print(".");
                 attempts++;
@@ -450,6 +470,11 @@ void WiFiManager::checkWiFiConnection() {
             
             if (WiFi.status() == WL_CONNECTED) {
                 Serial.println("\nReconnected to WiFi!");
+                Serial.print("Connected to: ");
+                Serial.print(WiFi.SSID());
+                Serial.print(" | IP address: ");
+                Serial.println(WiFi.localIP());
+                
                 isConnected = true;
                 connectionErrorCounter = 0; // Reset error counter on success
                 
@@ -703,6 +728,7 @@ void WiFiManager::handleModeSelect() {
     
     // Reset measurement state
     isMeasuring = false;
+    resetMeasurementStreamState();
     
     String html = "<!DOCTYPE html><html>"
                 "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
@@ -819,7 +845,8 @@ void WiFiManager::handleLoginSubmit() {
             initializeSensorCallback();
         }
         
-        isMeasuring = true;
+        // Do NOT set isMeasuring=true here - measurement should only start
+        // after user clicks "Start Measuring" and page confirms load
     } else {
         html += "<p class='error'>Login failed!</p>"
                 "<p>Invalid email or password. Please try again.</p>"
@@ -840,34 +867,17 @@ void WiFiManager::handleLoginSubmit() {
 void WiFiManager::handleGuest() {
     isGuestMode = true;
     isLoggedIn = false;
-    saveWiFiCredentials("", "", true);
     
-    String html = "<!DOCTYPE html><html>"
-                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-                  "<title>HealthSense Guest Mode</title>"
-                  "<style>"
-                  "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; text-align: center; background-color: #f0f0f0; }"
-                  ".container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-                  "h1 { color: #333; }"
-                  ".success { color: #2196F3; }"
-                  "a { color: #2196F3; text-decoration: none; font-weight: bold; }"
-                  "a:hover { text-decoration: underline; }"
-                  ".reconfigure-btn { background: #f44336; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin-top: 30px; width: 100%; }"
-                  ".reconfigure-btn:hover { background: #d32f2f; }"
-                  "</style>"
-                  "</head>"
-                  "<body>"
-                  "<div class='container'>"
-                  "<h1>Guest Mode Activated</h1>"
-                  "<p class='success'>The device is now operating in Guest Mode.</p>"
-                  "<p>You can measure your vital signs without creating an account.</p>"
-                  "<p>To save your measurements and track your health over time, please register at: "
-                  "<a href='https://iot.newnol.io.vn' target='_blank'>HealthSense Portal</a></p>"
-                  "<meta http-equiv='refresh' content='2;url=/measurement'>"
-                  "<p>You will be redirected to measurement in 2 seconds...</p>"
-                  "</div>"
-                  "</body></html>";
-    server->send(200, "text/html", html);
+    // In guest mode, we should still preserve the WiFi credentials
+    // Just mark the mode as guest in EEPROM without clearing SSID/password
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.write(MODE_ADDR, 1); // Set guest mode flag (1=guest mode)
+    EEPROM.commit();
+    EEPROM.end();
+    
+    // Directly redirect to measurement page instead of showing guest page
+    server->sendHeader("Location", "/measurement");
+    server->send(302, "text/plain", "");
     
     // Initialize sensor if callback exists
     if (initializeSensorCallback) {
@@ -878,7 +888,8 @@ void WiFiManager::handleGuest() {
         updateConnectionStatusCallback(isConnected, true, false);
     }
     
-    isMeasuring = true;
+    // Do NOT set isMeasuring=true here - measurement should only start
+    // after user clicks "Start Measuring" and page confirms load
 }
 
 void WiFiManager::handleMeasurement() {
@@ -888,6 +899,14 @@ void WiFiManager::handleMeasurement() {
         server->send(302, "text/plain", "");
         return;
     }
+    
+    // Reset measurement state to ensure we're starting fresh
+    extern SensorManager sensorManager;
+    sensorManager.stopMeasurement();
+    isMeasuring = false;
+    resetMeasurementStreamState();
+    
+    Serial.println("📱 Displaying measurement page - ready for user to start measuring");
     
     // Simplified CSS to reduce page size
     String css = "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
@@ -901,7 +920,7 @@ void WiFiManager::handleMeasurement() {
                  ".user{color:#4CAF50;font-weight:bold;font-size:14px}.guest{color:#FF9800;font-weight:bold;font-size:14px}"
                  ".card{border:1px solid #ddd;border-radius:8px;padding:12px;margin:15px 0;background:#f9f9f9}"
                  "a{color:#2196F3;text-decoration:none;font-weight:bold}a:hover{text-decoration:underline}"
-                 "button{background:#4CAF50;color:white;padding:8px 12px;border:none;border-radius:4px;cursor:pointer;margin:4px}";
+                 "button{background:#4CAF50;color:white;padding:10px 15px;border:none;border-radius:4px;cursor:pointer;margin:8px 0;width:100%;font-size:16px}";
     
     String html = "<!DOCTYPE html><html>"
                   "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
@@ -914,51 +933,24 @@ void WiFiManager::handleMeasurement() {
                   "<h1>HealthSense Measurement</h1>";
     
     if (isLoggedIn) {
-        html += "<p class='user'>User Mode - Data Saved</p>";
+        html += "<p class='user'>User Mode - Data will be saved</p>";
     } else {
-        html += "<p class='guest'>Guest Mode - No Data Saved</p>";
+        html += "<p class='guest'>Guest Mode - No data will be saved</p>";
     }
     
-    // Get data from SensorManager
-    extern SensorManager sensorManager;
-    
-    // Check if measurement is complete
-    if (sensorManager.isMeasurementReady()) {
-        // Just indicate that measurement is complete with minimal info
-        html += "<div class='complete'>✓ Measurement Complete</div>"
-                "<div class='card'>"
-                "<p>Your measurement has been completed successfully.</p>"
-                "<p>The LCD screen shows the final results.</p>"
-                "<p>Click the button below to view all measurement details.</p>"
-                "</div>";
-                
-        // Add Get Results button - this is the main call-to-action when measurement is complete
-        html += "<form action='/measurement_info' method='get'>"
-                "<button type='submit' style='font-size:16px;padding:12px 25px;margin:15px 0'>Get Results</button>"
-                "</form>";
-    } else if (sensorManager.isMeasurementInProgress()) {
-        // Show measurement in progress
-        html += "<div class='measuring'>⏱️ Measurement in Progress</div>"
-                "<div class='card'>"
-                "<p>Please keep your finger on the sensor until the measurement is complete.</p>"
-                "<p>The LCD screen will show measurement progress.</p>"
-                "<p>Progress: " + String(sensorManager.getValidReadingCount()) + "/5 valid readings</p>"
-                "</div>";
-    } else {
-        // Ready to start measuring
-        html += "<div class='card'>"
-                "<p>Place your finger on the sensor to begin measurement.</p>"
-                "<p>The device will collect 5 valid readings.</p>"
-                "<p>Keep your finger steady during the measurement process.</p>"
-                "</div>";
-                
-        html += "<form action='/continue_measuring' method='get'>"
-                "<button type='submit'>Start Measurement</button>"
-                "</form>";
-    }
+    // Simple measurement page with two options
+    html += "<div class='card'>"
+            "<p>Welcome to the HealthSense measurement page.</p>"
+            "<p>Place your finger on the sensor and press Start Measuring to begin.</p>"
+            "</div>";
+            
+    // Start measuring button
+    html += "<form action='/measurement_stream' method='get'>"
+            "<button type='submit'>Start Measuring</button>"
+            "</form>";
     
     // Button to return to mode selection
-    html += "<form action='/mode' method='get' style='margin-top:10px'>"
+    html += "<form action='/mode' method='get'>"
             "<button type='submit' style='background:#f44336'>Back to Mode Select</button>"
             "</form>";
             
@@ -970,60 +962,20 @@ void WiFiManager::handleMeasurement() {
     server->sendHeader("Expires", "-1");
     server->send(200, "text/html", html);
     
-    // Ensure we're in measurement state
-    isMeasuring = true;
+    // NOTE: We do NOT set isMeasuring=true here, as measurement shouldn't start
+    // until the user clicks "Start Measuring" and reaches the measuring stream page
     
     // Free memory after sending page
     cleanupConnections();
 }
 
 void WiFiManager::handleContinueMeasuring() {
-    String css = "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
-                 ".container{max-width:400px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1)}"
-                 "h1{color:#333;font-size:20px;margin-top:0}"
-                 ".loader{width:60px;height:60px;border-radius:50%;border:5px solid #f3f3f3;border-top:5px solid #3498db;animation:spin 1s linear infinite;margin:20px auto}"
-                 "@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}"
-                 ".steps{text-align:left;margin:20px auto;max-width:320px;line-height:1.6}"
-                 ".steps li{margin-bottom:8px}"
-                 ".success{color:#4CAF50;font-weight:bold}";
-    
-    String html = "<!DOCTYPE html><html>"
-                  "<head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-                  "<meta charset='UTF-8'>"
-                  "<title>Starting Measurement</title>"
-                  "<style>" + css + "</style>"
-                  "<meta http-equiv='refresh' content='2;url=/measurement'>"
-                  "</head>"
-                  "<body>"
-                  "<div class='container'>"
-                  "<h1>Starting New Measurement</h1>"
-                  "<div class='loader'></div>"
-                  "<p class='success'>Initializing sensor...</p>"
-                  "<div class='steps'>"
-                  "<p>Instructions:</p>"
-                  "<ol>"
-                  "<li>Place your index finger on the sensor</li>"
-                  "<li>Keep your finger still during measurement</li>"
-                  "<li>The device will collect 5 valid readings</li>"
-                  "<li>The screen will show when measurement is complete</li>"
-                  "</ol>"
-                  "</div>"
-                  "<p>You will be redirected to the measurement page automatically...</p>"
-                  "</div>"
-                  "</body></html>";
-    
-    server->send(200, "text/html", html);
-    
-    // Trigger start of new measurement via callback
-    Serial.println("Web interface requested new measurement cycle");
-    
-    // Reset measurement state 
-    isMeasuring = true;
+    // Reset the measurement stream first load flag
+    resetMeasurementStreamState();
     
     // First, ensure we stop any previous measurement
     extern SensorManager sensorManager;
     sensorManager.stopMeasurement();
-    delay(50);  // Brief delay to ensure processes complete
     
     // Reset the display and sensor state through callback
     if (initializeSensorCallback) {
@@ -1031,19 +983,18 @@ void WiFiManager::handleContinueMeasuring() {
         initializeSensorCallback();
     }
     
-    // Start the new measurement process with explicit logging
-    Serial.println("Starting new measurement process");
+    // Important: We DO NOT start the measurement here!
+    // The measurement will be started when the measurement_stream page is loaded
     
-    if (startNewMeasurementCallback) {
-        Serial.println("Using registered callback to start measurement");
-        startNewMeasurementCallback();
-    } else {
-        Serial.println("No callback registered, starting measurement directly");
-        // Direct fallback if no callback is set
-        sensorManager.startMeasurement();
-    }
+    Serial.println("Re-measure requested, redirecting to measurement stream page");
+    server->sendHeader("Location", "/measurement_stream");
+    server->send(302, "text/plain", "");
+    Serial.println("Device prepared for measurement - waiting for measuring page to load");
     
-    Serial.println("New measurement process initiated");
+    // Directly redirect to measurement stream page
+    Serial.println("Redirecting to measurement stream page");
+    server->sendHeader("Location", "/measurement_stream");
+    server->send(302, "text/plain", "");
 }
 
 void WiFiManager::handleReconfigWiFi() {
@@ -1196,8 +1147,20 @@ void WiFiManager::handleNotFound() {
 }
 
 void WiFiManager::loop() {
-    // Process DNS and server requests
+    // Process DNS requests
     dnsServer->processNextRequest();
+    
+    // Ensure WiFi is maintained
+    static unsigned long lastWiFiCheckInLoop = 0;
+    if (millis() - lastWiFiCheckInLoop > 1000) { // Check every second in loop
+        lastWiFiCheckInLoop = millis();
+        if (WiFi.getMode() != WIFI_AP_STA) {
+            Serial.println("Fixing WiFi mode in loop - setting to AP+STA");
+            WiFi.mode(WIFI_AP_STA);
+        }
+    }
+    
+    // Handle client requests
     server->handleClient();
     
     // Check WiFi connection status
@@ -1486,14 +1449,14 @@ void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
     Serial.print(F(", userUID length: "));
     Serial.println(userUID.length());
     
-    // Only send data if measuring and user is logged in (not guest mode)
-    if (isMeasuring && isLoggedIn && !isGuestMode && userUID.length() > 0) {
+    // Only send data to API server if user is logged in (not guest mode)
+    if (isLoggedIn && !isGuestMode && userUID.length() > 0) {
         Serial.println(F("📤 Sending measurement data to server (User mode)"));
         bool success = sendDeviceData(heartRate, spo2, userUID);
         if (success) {
-            Serial.println(F("✅ Data sent successfully"));
+            Serial.println(F("✅ Data sent successfully to API"));
         } else {
-            Serial.println(F("❌ Failed to send data"));
+            Serial.println(F("❌ Failed to send data to API"));
         }
         
         // Call callback if it exists
@@ -1501,7 +1464,7 @@ void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
             Serial.println(F("🔔 Calling sendDataCallback for user mode"));
             sendDataCallback(userUID, heartRate, spo2);
         }
-    } else if (isMeasuring && isGuestMode) {
+    } else if (isGuestMode) {
         Serial.println(F("👤 Guest mode - not sending data to server"));
         
         // Call callback for guest mode (for local display only)
@@ -1509,7 +1472,7 @@ void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
             Serial.println(F("🔔 Calling sendDataCallback for guest mode"));
             sendDataCallback("guest", heartRate, spo2);
         }
-    } else if (isMeasuring && !isLoggedIn) {
+    } else if (!isLoggedIn) {
         Serial.println(F("🔒 User not logged in - not sending data to server"));
         
         // Call callback for anonymous mode (for local display only)
@@ -1530,11 +1493,16 @@ void WiFiManager::sendSensorData(int32_t heartRate, int32_t spo2) {
         Serial.println(F("'"));
     }
     
-    // Reset measurement state after data is sent
-    isMeasuring = false;
-    Serial.println(F("🛑 Measurement state reset - ready for new measurement"));
+    // Reset the firstLoad flag in handleMeasurementStream to ensure future measurements start properly
+    // Note: This is a static variable in handleMeasurementStream that needs to be reset
+    
+    // Keep the ESP in measuring mode so the measurement results page can access data
+    Serial.println(F("✓ Measurement complete - results ready"));
     
     Serial.println(F("🏁 sendSensorData() completed"));
+    
+    // The measurement_stream page will detect that measurement is complete
+    // and automatically redirect to the results page
 }
 
 bool WiFiManager::getAIHealthSummary(String& summary) {
@@ -1836,8 +1804,8 @@ void WiFiManager::handleAIAnalysis() {
 }
 
 void WiFiManager::handleReturnToMeasurement() {
-    // Reset measurement state
-    isMeasuring = true;
+    // Do NOT set isMeasuring=true here - measurement should only start
+    // after user clicks "Start Measuring" and page confirms load
     
     // Trigger sensor initialization (this also resets the display)
     if (initializeSensorCallback) {
@@ -1872,12 +1840,43 @@ void WiFiManager::cleanupConnections() {
 
 void WiFiManager::forceSocketCleanup() {
     // This is a more aggressive cleanup for when connections are stuck
-    WiFi.disconnect(true, false); // Disconnect from AP but keep configs
+    Serial.println("Performing force socket cleanup");
+    
+    // Close all sockets and force WiFi to reconnect
+    WiFi.disconnect(true);
+    delay(200);
+    WiFi.mode(WIFI_AP_STA);
     delay(200);
     
     // Reconnect using saved credentials
     if (userSSID.length() > 0) {
         Serial.println(F("Reconnecting to WiFi after socket cleanup"));
+        WiFi.begin(userSSID.c_str(), userPassword.c_str());
+    }
+}
+
+// Function to ensure WiFi stability
+void WiFiManager::ensureWiFiStability() {
+    // Check if we're in the correct WiFi mode
+    if (WiFi.getMode() != WIFI_AP_STA) {
+        Serial.println("Fixing WiFi mode - setting to AP+STA");
+        WiFi.mode(WIFI_AP_STA);
+        delay(100);
+    }
+    
+    // Check if AP is running as expected
+    if (apModeActive && WiFi.softAPIP() != apIP) {
+        Serial.println("AP mode issue detected, reconfiguring AP");
+        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+        delay(100);
+    }
+    
+    // Ensure DNS server is running
+    dnsServer->processNextRequest();
+    
+    // Reconnect to user network if needed
+    if (userSSID.length() > 0 && WiFi.status() != WL_CONNECTED) {
+        Serial.println(F("Reconnecting to WiFi after stability check"));
         WiFi.begin(userSSID.c_str(), userPassword.c_str());
         
         // Wait briefly for connection
@@ -1989,7 +1988,6 @@ void WiFiManager::handleMeasurementInfo() {
             "</div>";
             
     // Add measurement process details
-    // In a real implementation, we would get this from the sensor manager
     html += "<div class='card'>"
             "<h2>Measurement Process</h2>"
             "<p>Valid readings collected during measurement:</p>"
@@ -2012,20 +2010,21 @@ void WiFiManager::handleMeasurementInfo() {
     html += "<div class='card' style='text-align:center'>"
             "<h2>Actions</h2>";
     
-    // Re-measurement button for all users
+    // Re-measure button - primary action
     html += "<form action='/continue_measuring' method='get' style='display:inline-block;margin:5px'>"
-            "<button type='submit'>Measure Again</button>"
+            "<button type='submit' style='font-size:16px;padding:12px 25px'>Re-measure</button>"
             "</form>";
     
-    // AI Analysis button based on user mode
-    if (isGuestMode) {
-        // For guest users, show registration modal when clicking AI button
-        html += "<button type='button' onclick='document.getElementById(\"registrationModal\").style.display=\"block\"' class='btn-blue' style='display:inline-block;margin:5px'>"
-                "AI Analysis</button>";
-    } else if (isLoggedIn) {
+    // Return to measurement page
+    html += "<form action='/measurement' method='get' style='display:inline-block;margin:5px'>"
+            "<button type='submit' class='btn-blue'>Back to Measure Page</button>"
+            "</form>";
+    
+    // AI Analysis button based on user mode - only if user is logged in
+    if (isLoggedIn) {
         // For logged-in users, provide actual AI analysis
         html += "<form action='/ai_analysis' method='get' style='display:inline-block;margin:5px'>"
-                "<button type='submit' class='btn-blue'>AI Analysis</button>"
+                "<button type='submit' class='btn-orange'>AI Analysis</button>"
                 "</form>";
     }
     
@@ -2036,17 +2035,13 @@ void WiFiManager::handleMeasurementInfo() {
     
     html += "</div>";
     
-    // Add registration modal for guest mode
+    // Add registration modal for guest mode (if needed for some features)
     if (isGuestMode) {
-        html += "<div id='registrationModal' class='modal'>"
-                "<div class='modal-content'>"
-                "<h2>Registration Required</h2>"
-                "<p>AI Analysis is only available for registered users.</p>"
-                "<p>Please register an account at:</p>"
-                "<p><a href='https://iot.newnol.io.vn' target='_blank'>HealthSense Portal</a></p>"
-                "<button onclick='document.getElementById(\"registrationModal\").style.display=\"none\"' class='btn-orange'>Close</button>"
-                "</div>"
-                "</div>";
+        html += "<div class='card'>"
+               "<h2>Want More Features?</h2>"
+               "<p>Register an account to save your measurements and access AI analysis.</p>"
+               "<p><a href='https://iot.newnol.io.vn' target='_blank'>Visit HealthSense Portal</a></p>"
+               "</div>";
     }
     
     html += "</div></body></html>";
@@ -2055,11 +2050,47 @@ void WiFiManager::handleMeasurementInfo() {
     server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server->send(200, "text/html", html);
     
+    // Reset measurement stream state for next measurement
+    resetMeasurementStreamState();
+    
     // Free memory after sending page
     cleanupConnections();
 }
 
+// Static variable to track first load of measurement stream page
+static bool measurementStreamFirstLoad = true;
+
+void WiFiManager::startMeasurement() {
+    isMeasuring = true;
+    Serial.println(F("🔄 WiFiManager::startMeasurement - Set isMeasuring = true"));
+}
+
+void WiFiManager::stopMeasurement() {
+    isMeasuring = false;
+    Serial.println(F("🛑 WiFiManager::stopMeasurement - Set isMeasuring = false"));
+    
+    // Also make sure sensor manager stops measuring
+    extern SensorManager sensorManager;
+    if (sensorManager.isMeasurementInProgress()) {
+        Serial.println(F("Stopping sensor measurement from WiFiManager"));
+        sensorManager.stopMeasurement();
+    }
+}
+
+void WiFiManager::resetMeasurementStreamState() {
+    // Reset the firstLoad flag for measurement stream
+    measurementStreamFirstLoad = true;
+    Serial.println("Reset measurement stream state - ready for next measurement");
+}
+
 void WiFiManager::handleMeasurementStream() {
+    // Ensure WiFi stability before handling request
+    ensureWiFiStability();
+    
+    // Check WiFi status before processing
+    Serial.print("🌐 WiFi Status before measurement stream: ");
+    Serial.println(WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED");
+    
     // Check if user is logged in or in guest mode
     if (!isGuestMode && !isLoggedIn) {
         server->sendHeader("Location", "/mode");
@@ -2067,96 +2098,250 @@ void WiFiManager::handleMeasurementStream() {
         return;
     }
     
-    // Auto-refreshing web page with measurement data
+    // Reset measurement state first
+    extern SensorManager sensorManager;
+    if (sensorManager.isMeasurementInProgress()) {
+        sensorManager.stopMeasurement();
+    }
+    
+    Serial.println("📈 User requested to start measuring - preparing measurement stream page");
+    
+    // If measurement is complete, redirect to results page
+    if (sensorManager.isMeasurementReady()) {
+        Serial.println("Measurement ready, redirecting to results page");
+        server->sendHeader("Location", "/measurement_info");
+        server->send(302, "text/plain", "");
+        return;
+    }
+    
+    // IMPORTANT CHANGE: Start measuring immediately when this page is loaded, instead of waiting
+    // for the JavaScript fetch call which might fail due to connectivity issues
+    Serial.println("🚀 Starting measurement directly when measurement stream page loads");
+    isMeasuring = true; // Set measurement flag to true
+    
+    // Start the measurement process
+    if (startNewMeasurementCallback) {
+        Serial.println("Using registered callback to start measurement");
+        startNewMeasurementCallback();
+    } else {
+        Serial.println("Starting measurement directly");
+        sensorManager.startMeasurement();
+    }
+    
+    Serial.println("⭐ Measurement activated: isMeasuring = " + String(isMeasuring ? "YES" : "NO"));
+    
+    // Simple measuring page with spinner and IMPROVED JavaScript
     String html = "<!DOCTYPE html><html>"
                   "<head><meta charset='UTF-8'>"
                   "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-                  "<title>Live Measurement</title>"
+                  "<title>Measuring...</title>"
                   "<style>"
                   "body{font-family:Arial;margin:0;padding:10px;background:#f0f0f0;text-align:center}"
                   ".container{max-width:400px;margin:0 auto;background:white;padding:15px;border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,0.1)}"
-                  ".reading{font-size:24px;margin:15px 0}"
-                  ".hr{color:#f44336}.spo2{color:#2196F3}"
-                  ".progress{width:100%;background:#ddd;border-radius:4px;margin:15px 0;height:20px}"
-                  ".bar{height:20px;background:#4CAF50;border-radius:4px;text-align:center;line-height:20px;color:white}"
-                  ".btn{background:#4CAF50;color:white;padding:10px;border:none;border-radius:4px;cursor:pointer;margin:5px;display:inline-block;text-decoration:none}"
-                  ".btn-blue{background:#2196F3}.btn-orange{background:#FF9800}.btn-red{background:#f44336}"
-                  ".timestamp{color:#666;font-size:12px;margin-bottom:10px}"
+                  "h1{color:#333;font-size:22px;margin-top:0}"
+                  ".loader{width:60px;height:60px;border-radius:50%;border:5px solid #f3f3f3;border-top:5px solid #3498db;animation:spin 1.5s linear infinite;margin:20px auto}"
+                  "@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}"
+                  ".status{padding:15px;margin:15px 0;font-weight:bold;color:#1976d2;font-size:18px}"
+                  ".user{color:#4CAF50;font-weight:bold;font-size:14px}.guest{color:#FF9800;font-weight:bold;font-size:14px}"
+                  ".note{margin:30px 0 10px;font-size:14px;color:#666}"
                   "</style>"
+                  "<script>"
+                  "// Handle page load completion"
+                  "window.addEventListener('load', function() {"
+                  "  console.log('Measurement page loaded - measurement already started');"
+                  "  startStatusChecking();" // Start checking immediately when page loads
+                  "});"
+                  ""
+                  "// Function to handle redirect from server or trigger manual redirect"
+                  "function startStatusChecking() {"
+                  "  // Check more frequently (every 1 second)"
+                  "  var checkStatusInterval = setInterval(function() {"
+                  "    fetch('/check_measurement_status')"
+                  "      .then(response => {"
+                  "        // If we get a redirect response (302), follow it immediately"
+                  "        if (response.redirected) {"
+                  "          console.log('Server redirected, following to:', response.url);"
+                  "          clearInterval(checkStatusInterval);"
+                  "          window.location.href = response.url;"
+                  "          return 'redirected';" 
+                  "        }"
+                  "        return response.text();"
+                  "      })"
+                  "      .then(status => {"
+                  "        if (status === 'redirected') return;" // Already handled redirect
+                  "        console.log('Received status:', status);"
+                  "        if (status === 'complete') {"
+                  "          console.log('Measurement complete, redirecting...');"
+                  "          clearInterval(checkStatusInterval);"
+                  "          window.location.href = '/measurement_info';"
+                  "        }"
+                  "      })"
+                  "      .catch(error => {"
+                  "        console.error('Error checking status:', error);"
+                  "        // If we get an error, it might be because the ESP32 has redirected and"
+                  "        // the connection was closed. Try loading the results page directly."
+                  "        window.location.href = '/measurement_info';"
+                  "      });"
+                  "  }, 1000);" // Check every 1 second
+                  "}"
+                  "</script>"
                   "</head><body><div class='container'>"
-                  "<h1>Live Measurement View</h1>"
-                  "<div class='timestamp'>Updated: " + String(millis() / 1000) + "s</div>";
+                  "<h1>Measurement in Progress</h1>";
 
-    // Get data from SensorManager
-    extern SensorManager sensorManager;
-    
-    // Display data based on measurement state
-    if (sensorManager.isMeasurementReady()) {
-        // Completed - show averaged results
-        int32_t avgHR = sensorManager.getAveragedHR();
-        int32_t avgSpO2 = sensorManager.getAveragedSpO2();
-        
-        html += "<div style='color:#4CAF50;font-weight:bold;font-size:18px;margin:15px 0'>✓ Measurement Complete</div>"
-                "<div class='progress'><div class='bar' style='width:100%'>5/5</div></div>"
-                "<div class='reading hr'>Heart Rate: " + String(avgHR) + " BPM</div>"
-                "<div class='reading spo2'>SpO2: " + String(avgSpO2) + " %</div>"
-                "<p>All valid readings have been collected</p>"
-                "<a href='/measurement_info' class='btn'>View Results</a>"
-                "<a href='/continue_measuring' class='btn btn-blue'>New Measurement</a>";
-    }
-    else if (sensorManager.isMeasurementInProgress()) {
-        // In progress - show live progress bar
-        int validCount = sensorManager.getValidReadingCount();
-        int progress = (validCount * 100) / REQUIRED_VALID_READINGS;
-        
-        html += "<div style='color:#2196F3;font-weight:bold;margin:15px 0'>Measurement in Progress</div>"
-                "<div class='progress'><div class='bar' style='width:" + String(progress) + "%'>" 
-                + String(validCount) + "/5</div></div>";
-                
-        // Show current reading (even if not valid)
-        int32_t currentHR = sensorManager.getHeartRate();
-        int32_t currentSpO2 = sensorManager.getSPO2();
-        bool validHR = sensorManager.isHeartRateValid();
-        bool validSpO2 = sensorManager.isSPO2Valid();
-        
-        // Always show current values, but mark if they're valid
-        String hrStatus = validHR ? "<span style='color:#4CAF50'>✓</span>" : "<span style='color:#999'>...</span>";
-        String spo2Status = validSpO2 ? "<span style='color:#4CAF50'>✓</span>" : "<span style='color:#999'>...</span>";
-        
-        html += "<div class='reading hr'>Heart Rate: " + String(currentHR) + " BPM " + hrStatus + "</div>";
-        html += "<div class='reading spo2'>SpO2: " + String(currentSpO2) + "% " + spo2Status + "</div>";
-        
-        // Show finger detection status
-        if (sensorManager.isFingerDetected()) {
-            html += "<p style='color:#4CAF50;font-weight:bold'>✓ Finger detected</p>";
-            html += "<p>Please hold still until all readings are collected</p>";
-        } else {
-            html += "<p style='color:#f44336;font-weight:bold'>✗ No finger detected</p>";
-            html += "<p>Please place your finger firmly on the sensor</p>";
-        }
-        
-        html += "<meta http-equiv='refresh' content='1'>";
-    }
-    else {
-        // Not started or ended
-        html += "<p>Waiting to start measurement</p>"
-                "<div class='reading hr'>Heart Rate: --</div>"
-                "<div class='reading spo2'>SpO2: --%</div>"
-                "<div class='progress'><div class='bar' style='width:0%'>0/5</div></div>"
-                "<p>Place your finger on the sensor to begin</p>"
-                "<a href='/continue_measuring' class='btn'>Start Measurement</a>"
-                "<a href='/measurement' class='btn btn-red'>Back to Main View</a>"
-                "<meta http-equiv='refresh' content='2'>";
+    // Show user mode
+    if (isLoggedIn) {
+        html += "<p class='user'>User Mode - Data will be saved to your account</p>";
+    } else {
+        html += "<p class='guest'>Guest Mode - Data will not be saved</p>";
     }
     
-    html += "</div></body></html>";
+    html += "<div class='loader'></div>"
+            "<div class='status'>Please wait while we collect your measurements</div>"
+            "<p class='note'>Values are being displayed on the device LCD screen.<br>"
+            "This page will automatically update when measurement is complete.</p>"
+            "<p id='countdown' style='display:none; color:#f44336; font-weight:bold;'>Redirecting in <span id='timer'>10</span>...</p>"
+            "<script>"
+            "// Add multiple failsafe redirects"
+            
+            "// Failsafe #1: Add a meta refresh tag after 30 seconds"
+            "setTimeout(function() {"
+            "  var meta = document.createElement('meta');"
+            "  meta.httpEquiv = 'refresh';"
+            "  meta.content = '2;url=/measurement_info';"
+            "  document.head.appendChild(meta);"
+            "  console.log('Added meta refresh tag as failsafe');"
+            "}, 30000);"
+            
+            "// Failsafe #2: Show countdown and redirect after 40 seconds"
+            "setTimeout(function() {"
+            "  document.getElementById('countdown').style.display = 'block';"
+            "  var count = 10;"
+            "  var timer = setInterval(function() {"
+            "    document.getElementById('timer').textContent = count;"
+            "    count--;"
+            "    if(count < 0) {"
+            "      clearInterval(timer);"
+            "      window.location.href = '/measurement_info';"
+            "    }"
+            "  }, 1000);"
+            "}, 40000);"
+            
+            "// Failsafe #3: Force redirect after 60 seconds no matter what"
+            "setTimeout(function() {"
+            "  console.log('Final failsafe activated, forcing redirect');"
+            "  window.location.href = '/measurement_info';" 
+            "}, 60000);"
+            "</script>"
+            
+            "<!-- Server-side automatic refresh after 60 seconds -->"
+            "<meta http-equiv='refresh' content='60;url=/measurement_info'>"
+            "</div></body></html>";
+    
+    Serial.println("✅ Measurement stream page sent, measurement already started");
     
     // Send HTTP response with cache control
     server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     server->sendHeader("Pragma", "no-cache");
     server->sendHeader("Expires", "-1");
     server->send(200, "text/html", html);
+}
+
+// This handler is called by the browser via fetch() AFTER the page is fully loaded
+void WiFiManager::handleStartMeasurement() {
+    // Ensure WiFi stability before handling request
+    ensureWiFiStability();
     
-    // Ensure we're in measurement state
+    // Check WiFi status before processing
+    Serial.print("🌐 WiFi Status before starting measurement: ");
+    Serial.println(WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED");
+    
+    // Only start if user is logged in or in guest mode
+    if (!isGuestMode && !isLoggedIn) {
+        server->send(403, "text/plain", "Not authorized");
+        return;
+    }
+    
+    Serial.println("Browser confirmed page is fully loaded - NOW STARTING MEASUREMENT");
+    Serial.println("User mode: " + String(isGuestMode ? "GUEST" : "LOGGED IN"));
+    
+    // Ensure WiFi mode is properly set before changing state
+    if (WiFi.getMode() != WIFI_AP_STA) {
+        Serial.println("Ensuring WiFi mode is AP+STA");
+        WiFi.mode(WIFI_AP_STA);
+        delay(100);  // Small delay to allow mode change
+    }
+    
+    // Now we can safely start the measurement
     isMeasuring = true;
+    
+    // Get data from SensorManager
+    extern SensorManager sensorManager;
+    
+    // Start the measurement
+    if (startNewMeasurementCallback) {
+        Serial.println("Using registered callback to start measurement");
+        startNewMeasurementCallback();
+    } else {
+        Serial.println("Starting measurement directly");
+        sensorManager.startMeasurement();
+    }
+    
+    // Send a simple response back to the browser
+    server->send(200, "text/plain", "Measurement started");
+    
+    // Debug output to confirm measurement was started
+    Serial.println("⭐ Measurement activation confirmed: isMeasuring = " + String(isMeasuring ? "YES" : "NO"));
+}
+
+// New handler to check if measurement is complete
+void WiFiManager::handleCheckMeasurementStatus() {
+    // Only allow if user is logged in or in guest mode
+    if (!isGuestMode && !isLoggedIn) {
+        server->send(403, "text/plain", "Not authorized");
+        return;
+    }
+    
+    // Get data from SensorManager
+    extern SensorManager sensorManager;
+    
+    // Check if measurement is complete
+    bool measurementReady = sensorManager.isMeasurementReady();
+    int validReadingCount = sensorManager.getValidReadingCount();
+    
+    Serial.print("🔍 Check Measurement Status - isMeasurementReady: ");
+    Serial.print(measurementReady ? "YES ✓" : "NO ✗");
+    Serial.print(", WiFi isMeasuring: ");
+    Serial.print(isMeasuring ? "YES" : "NO");
+    Serial.print(", Readings: ");
+    Serial.print(validReadingCount);
+    Serial.println("/5");
+    
+    // If measurement is complete or we have all required readings, redirect to results page
+    if (measurementReady || (validReadingCount >= REQUIRED_VALID_READINGS)) {
+        // Make sure to update our local state
+        if (isMeasuring) {
+            stopMeasurement(); // Stop measuring in WiFiManager
+        }
+        
+        Serial.println("✅ Measurement complete, redirecting to results page IMMEDIATELY");
+        
+        // IMPORTANT CHANGE: Use 302 redirect instead of regular response with refresh header
+        // This forces an immediate redirect to the results page
+        server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        server->sendHeader("Pragma", "no-cache");
+        server->sendHeader("Expires", "-1");
+        server->sendHeader("Location", "/measurement_info", true);
+        server->send(302, "text/plain", "Redirecting to results...");
+        
+        Serial.println("🔄 Sent 302 redirect to /measurement_info");
+        
+        // No need for the static redirectScheduled logic anymore since we're
+        // doing an immediate redirect
+    } else {
+        Serial.println("⏳ Measurement still in progress, sending 'in_progress' status");
+        server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        server->sendHeader("Pragma", "no-cache");
+        server->sendHeader("Expires", "-1");
+        server->send(200, "text/plain", "in_progress");
+    }
 }

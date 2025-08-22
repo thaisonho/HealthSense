@@ -197,6 +197,12 @@ void SensorManager::resetSensor() {
 }
 
 void SensorManager::processReadings() {
+    // Skip processing if measurement is already complete to prevent continued measurements
+    if (measurementComplete) {
+        Serial.println(F("🛑 Skipping processReadings() - measurement already complete"));
+        return;
+    }
+    
     if (!sensorReady) {
         // Try to reinitialize sensor if it's not ready
         resetSensor();
@@ -506,6 +512,14 @@ void SensorManager::startMeasurement() {
     Serial.print(F(" valid readings for averaging (timeout: "));
     Serial.print(MEASUREMENT_TIMEOUT_MS / 1000);
     Serial.println(F(" seconds)..."));
+    
+    // Make sure sensor is ready
+    if (!sensorReady) {
+        Serial.println(F("⚠️ Sensor not ready! Initializing..."));
+        initializeSensor();
+    }
+    
+    Serial.println(F("✅ Measurement started!"));
 }
 
 void SensorManager::stopMeasurement() {

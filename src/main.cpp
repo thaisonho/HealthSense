@@ -119,6 +119,10 @@ void setup() {
     // Send final averaged data to server (only if in user mode and logged in)
     wifiManager.sendSensorData(avgHR, avgSpO2);
     
+    // IMPORTANT FIX: Stop measurement in WiFiManager too
+    wifiManager.stopMeasurement();
+    Serial.println(F("Stopped measurement in WiFiManager"));
+    
     Serial.println(F("Measurement cycle complete. Sensor stopped."));
     Serial.println(F("Press 'Start New Measurement' to measure again."));
   });
@@ -182,6 +186,43 @@ void loop() {
       
       // Only process sensor readings when in measuring state, sensor is ready, and we should be measuring
       static bool initialReadingDone = false;
+      static unsigned long lastDebugTime = 0;
+      
+      // Debug output every 3 seconds to monitor measurement state
+      if (millis() - lastDebugTime > 3000) {
+        Serial.print(F("📊 Measurement States - Sensor isMeasuring: "));
+        Serial.print(sensorManager.isMeasurementInProgress() ? "YES" : "NO");
+        Serial.print(F(", measurementComplete: "));
+        Serial.print(sensorManager.isMeasurementReady() ? "YES" : "NO");
+        Serial.print(F(", WiFi isMeasuring: "));
+        Serial.println(wifiManager.isMeasurementActive() ? "YES" : "NO");
+        
+        // Also show reading count in this debug output
+        if (sensorManager.isMeasurementInProgress() || sensorManager.isMeasurementReady()) {
+          Serial.print(F("  - Valid readings: "));
+          Serial.print(sensorManager.getValidReadingCount());
+          Serial.print(F("/"));
+          Serial.print(REQUIRED_VALID_READINGS);
+          
+          if (sensorManager.isMeasurementReady()) {
+            Serial.print(F(" ✓ Final HR: "));
+            Serial.print(sensorManager.getAveragedHR());
+            Serial.print(F(", SpO2: "));
+            Serial.print(sensorManager.getAveragedSpO2());
+          }
+          Serial.println();
+        }
+        
+        lastDebugTime = millis();
+      }
+      
+      // IMPORTANT CHANGE: Check if wifiManager's measurement flag is set
+      // and sensor is not yet measuring - start the sensor measurement if needed
+      if (wifiManager.isMeasurementActive() && !sensorManager.isMeasurementInProgress() && 
+          !sensorManager.isMeasurementReady() && sensorManager.isReady()) {
+        Serial.println(F("🔄 Main loop detected WiFi measurement flag set but sensor not measuring yet - starting sensor"));
+        sensorManager.startMeasurement();
+      }
       
       if (sensorManager.isReady() && wifiManager.isMeasurementActive()) {
         
@@ -195,6 +236,11 @@ void loop() {
         // This will keep collecting samples until we have 5 valid readings
         sensorManager.processReadings();
         
+        // Check if measurement just completed
+        if (sensorManager.isMeasurementReady()) {
+          Serial.println(F("✅ Main loop detected measurement completion"));
+        }
+        
       } else {
         // Reset flag when measurement is not active
         initialReadingDone = false;
@@ -202,6 +248,7 @@ void loop() {
         if (wifiManager.isMeasurementActive() && !sensorManager.isReady()) {
           // If we're supposed to be measuring but sensor isn't ready,
           // try to reinitialize it
+          Serial.println(F("⚠️ WiFi measurement active but sensor not ready - reinitializing sensor"));
           sensorManager.initializeSensor();
           delay(100);
         }

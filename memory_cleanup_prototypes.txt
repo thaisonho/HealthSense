@@ -1,3 +1,0 @@
-// Add these prototypes to WiFiManager.h
-void cleanupConnections();
-void forceSocketCleanup();

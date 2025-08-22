@@ -54,7 +54,9 @@ private:
     void handleGuest();
     void handleMeasurement();
     void handleMeasurementInfo();
-    void handleMeasurementStream(); // Thêm handler mới cho stream kết quả đo
+    void handleMeasurementStream(); 
+    void handleStartMeasurement(); // New handler for browser to confirm page load and start measuring
+    void handleCheckMeasurementStatus(); // New handler to check if measurement is complete
     void handleContinueMeasuring();
     void handleReconfigWiFi();
     void handleStatus();
@@ -105,8 +107,12 @@ public:
     int getLastWifiErrorCode() const { return lastWifiErrorCode; }
     
     // Control measurement state
-    void startMeasurement() { isMeasuring = true; }
-    void stopMeasurement() { isMeasuring = false; }
+    void startMeasurement();
+    void stopMeasurement();
+    void resetMeasurementStreamState();
+    
+    // WiFi stability helper
+    void ensureWiFiStability();
     
     // Utility functions
     void forceAPMode();
