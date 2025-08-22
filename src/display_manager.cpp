@@ -151,8 +151,9 @@ void DisplayManager::setupSensorUI() {
     tft->setCursor(5, 130);
     tft->setTextColor(ST7735_YELLOW);
     tft->println("IP: " + WiFi.localIP().toString());
-    tft->setCursor(5, 140);
-    tft->println("Visit to reconfigure WiFi");
+    
+    // Show the AI Analysis button
+    showAIAnalysisButton();
 }
 
 void DisplayManager::updateSensorReadings(int32_t heartRate, bool validHR, int32_t spo2, bool validSPO2) {
@@ -198,4 +199,126 @@ void DisplayManager::showFingerStatus(bool fingerDetected) {
     } else {
         tft->print("Place finger...");
     }
+}
+
+void DisplayManager::showAIAnalysisButton() {
+    // Draw the AI Analysis button
+    tft->fillRoundRect(20, 150, 120, 20, 5, ST7735_BLUE);
+    tft->setTextColor(ST7735_WHITE);
+    tft->setTextSize(1);
+    tft->setCursor(45, 156);
+    tft->print("AI ANALYSIS");
+}
+
+void DisplayManager::showAIAnalysisLoading() {
+    // Clear the button area and show loading indicator
+    tft->fillRoundRect(20, 150, 120, 20, 5, ST7735_MAGENTA);
+    tft->setTextColor(ST7735_WHITE);
+    tft->setTextSize(1);
+    tft->setCursor(40, 156);
+    tft->print("ANALYZING...");
+}
+
+void DisplayManager::displayAIHealthSummary(const String& summary) {
+    Serial.println(F("📱 Displaying AI Health Summary"));
+    Serial.print(F("📏 Summary length: "));
+    Serial.println(summary.length());
+    
+    // Clear the entire screen for full-screen display
+    tft->fillScreen(ST7735_BLACK);
+    
+    // Draw a nice header with gradient
+    for (int16_t i = 0; i < 15; i++) {
+        uint16_t color = tft->color565(0, 64 + i * 12, 128 + i * 8);
+        tft->drawFastHLine(0, i, 160, color);
+    }
+    
+    // Draw header text
+    tft->setTextSize(1);
+    tft->setTextColor(ST7735_WHITE);
+    tft->setCursor(10, 5);
+    tft->print("AI HEALTH SUMMARY");
+    
+    // Draw a separator line
+    tft->drawFastHLine(0, 16, 160, ST7735_CYAN);
+    
+    // Display the summary text with word wrapping
+    tft->setTextColor(ST7735_GREEN);
+    
+    // Check if it's an error message
+    bool isError = summary.startsWith("Error:");
+    if (isError) {
+        tft->setTextColor(ST7735_RED);
+    }
+    
+    // Truncate very long summaries to prevent display issues
+    String displayText = summary;
+    if (displayText.length() > 800) { // Set a reasonable limit
+        displayText = displayText.substring(0, 800) + "...";
+        Serial.println(F("⚠️ Summary truncated for display"));
+    }
+    
+    // Word wrap and display the summary
+    int16_t xPos = 5;
+    int16_t yPos = 25;
+    String currentWord = "";
+    int lineCount = 0;
+    const int maxLines = 11; // Maximum number of lines that fit on the screen
+    
+    for (uint16_t i = 0; i < displayText.length(); i++) {
+        char c = displayText.charAt(i);
+        
+        if (c == ' ' || c == '\n' || i == displayText.length() - 1) {
+            if (i == displayText.length() - 1 && c != ' ' && c != '\n') {
+                currentWord += c;
+            }
+            
+            int16_t wordWidth = currentWord.length() * 6; // Approximate width calculation
+            
+            if (xPos + wordWidth > 155) {
+                xPos = 5;
+                yPos += 10; // Line height
+                lineCount++;
+                
+                // Check if we've reached the maximum number of lines
+                if (lineCount >= maxLines) {
+                    tft->print("...");
+                    break;
+                }
+            }
+            
+            tft->setCursor(xPos, yPos);
+            tft->print(currentWord);
+            
+            xPos += wordWidth + 3; // Space width
+            currentWord = "";
+            
+            if (c == '\n') {
+                xPos = 5;
+                yPos += 10;
+                lineCount++;
+                
+                // Check if we've reached the maximum number of lines
+                if (lineCount >= maxLines) {
+                    tft->setCursor(xPos, yPos);
+                    tft->print("...");
+                    break;
+                }
+            }
+        } else {
+            currentWord += c;
+        }
+    }
+    
+    // Add a footer note about returning via web interface
+    tft->setTextColor(ST7735_YELLOW);
+    tft->setCursor(5, 140);
+    tft->print("Use web interface to return");
+    
+    // Debug info
+    Serial.println(F("✅ AI Health Summary displayed"));
+    
+    // Track memory usage for debugging
+    Serial.print(F("💾 Free memory after display: "));
+    Serial.println(ESP.getFreeHeap());
 }

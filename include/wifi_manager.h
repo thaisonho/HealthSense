@@ -37,6 +37,7 @@ private:
     void (*updateConnectionStatusCallback)(bool connected, bool guestMode, bool loggedIn);
     void (*sendDataCallback)(String uid, int32_t heartRate, int32_t spo2);
     void (*startNewMeasurementCallback)();
+    void (*handleAIAnalysisCallback)(String summary);
     
     // Web handlers
     void handleRoot();
@@ -52,10 +53,13 @@ private:
     void handleStatus();
     void handleForceAP();
     void handleNotFound();
+    void handleAIAnalysis();
+    void handleReturnToMeasurement();
     
     // API communication
     bool authenticateUser(String email, String password);
     bool sendMeasurementData(String uid, int32_t heartRate, int32_t spo2);
+    bool getAIHealthSummary(String& summary);
 
 public:
     WiFiManager(const char* ap_ssid, const char* ap_password, const char* serverURL = "http://yourapiserver.com");
@@ -69,11 +73,13 @@ public:
     void saveUserCredentials(String email, String uid);
     void sendSensorData(int32_t heartRate, int32_t spo2);
     bool sendDeviceData(int32_t heartRate, int32_t spo2, String userId = "");
+    bool requestAIHealthSummary(String& summary);
     
     // Setters for callbacks
     void setSetupUICallback(void (*callback)());
     void setInitializeSensorCallback(void (*callback)());
     void setUpdateConnectionStatusCallback(void (*callback)(bool connected, bool guestMode, bool loggedIn));
+    void setHandleAIAnalysisCallback(void (*callback)(String summary));
     void setSendDataCallback(void (*callback)(String uid, int32_t heartRate, int32_t spo2));
     void setStartNewMeasurementCallback(void (*callback)());
     

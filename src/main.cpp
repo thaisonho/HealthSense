@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
+#include "esp32_max30105_fix.h" // Include this before Adafruit_GFX to fix I2C_BUFFER_LENGTH issue
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 
@@ -25,22 +27,17 @@ DisplayManager display(&tft, eva, eva_width, eva_height);
 WiFiManager wifiManager("HealthSense", "123123123", "https://iot.newnol.io.vn");
 SensorManager sensorManager(100); // buffer size 100
 
-// App state
-enum AppState {
-  STATE_SETUP,
-  STATE_CONNECTING,
-  STATE_LOGIN,
-  STATE_MEASURING
-};
-
+// Global app state (using the common AppState enum from common_types.h)
 AppState currentState = STATE_SETUP;
 bool isInitialized = false;
+String aiSummaryResult = "";
 
 // Function prototypes
 void setupUI();
 void initializeSensor();
 void updateConnectionStatus(bool connected, bool guestMode, bool loggedIn);
 void sendSensorData(String uid, int32_t heartRate, int32_t spo2);
+void handleAIAnalysisRequest(String summaryText);
 
 void setup() {
   Serial.begin(9600);
@@ -62,6 +59,9 @@ void setup() {
       sensorManager.startMeasurement();
     }
   });
+  
+  // Set up AI Analysis callback
+  wifiManager.setHandleAIAnalysisCallback(handleAIAnalysisRequest);
   
   // Set up callbacks for sensor manager
   sensorManager.setUpdateReadingsCallback([](int32_t hr, bool validHR, int32_t spo2, bool validSPO2) {
@@ -192,6 +192,10 @@ void loop() {
         }
       }
       break;
+      
+    case STATE_AI_ANALYSIS:
+      // Just display the AI analysis - user will return via web interface
+      break;
   }
 }
 
@@ -243,4 +247,14 @@ void sendSensorData(String uid, int32_t heartRate, int32_t spo2) {
   Serial.print(heartRate);
   Serial.print(", SpO2: ");
   Serial.println(spo2);
+}
+
+// Handle AI analysis request with provided summary text
+void handleAIAnalysisRequest(String summaryText) {
+  // Update the current state
+  currentState = STATE_AI_ANALYSIS;
+  
+  // Display the AI health summary
+  display.displayAIHealthSummary(summaryText);
+  Serial.println("AI Health Summary displayed");
 }
